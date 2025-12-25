@@ -211,7 +211,7 @@ class AdaptiveReferences:
         goal = 1.0 / (1.0 + loss / ref)
         return torch.clamp(goal, 0.001, 1.0)
 
-RECALIBRATION_EPOCHS = [10, 20]  # Recalibrate at these epochs
+RECALIBRATION_EPOCHS = [10, 20, 30]  # Recalibrate every 10 epochs
 RECALIBRATION_BATCHES = 100  # Batches to collect before recalibrating
 
 # Loss names - added texture_transfer

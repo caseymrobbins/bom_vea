@@ -70,7 +70,10 @@ class GoalSystem:
         print("\n" + "=" * 60)
         print(f"CALIBRATING GOALS (#{self.calibration_count}, epoch {epoch})")
         print("=" * 60)
-        
+
+        # v14: Verify BOX constraints contain initial values
+        box_violations = []
+
         for name, spec in self.specs.items():
             ctype = spec['type']
             if ctype == ConstraintType.MINIMIZE_SOFT and spec.get('scale') == 'auto':
@@ -89,13 +92,36 @@ class GoalSystem:
                 print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed)")
             elif ctype == ConstraintType.BOX:
                 self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'])
-                print(f"  {name:20s}: BOX [{spec['lower']:.2f}, {spec['upper']:.2f}]")
+                if self.samples.get(name):
+                    median = np.median(self.samples[name])
+                    min_val = np.min(self.samples[name])
+                    max_val = np.max(self.samples[name])
+                    print(f"  {name:20s}: BOX [{spec['lower']:.2f}, {spec['upper']:.2f}] | init=[{min_val:.2f}, {max_val:.2f}] median={median:.2f}")
+                    if min_val < spec['lower'] or max_val > spec['upper']:
+                        box_violations.append(f"{name}: init range [{min_val:.2f}, {max_val:.2f}] outside BOX [{spec['lower']:.2f}, {spec['upper']:.2f}]")
+                else:
+                    print(f"  {name:20s}: BOX [{spec['lower']:.2f}, {spec['upper']:.2f}] (no samples)")
             elif ctype == ConstraintType.BOX_ASYMMETRIC:
                 self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'], healthy=spec['healthy'])
-                print(f"  {name:20s}: BOX_ASYM [{spec['lower']:.0f}, {spec['upper']:.0f}] h={spec['healthy']:.0f}")
+                if self.samples.get(name):
+                    median = np.median(self.samples[name])
+                    min_val = np.min(self.samples[name])
+                    max_val = np.max(self.samples[name])
+                    print(f"  {name:20s}: BOX_ASYM [{spec['lower']:.0f}, {spec['upper']:.0f}] h={spec['healthy']:.0f} | init=[{min_val:.0f}, {max_val:.0f}] median={median:.0f}")
+                    if min_val < spec['lower'] or max_val > spec['upper']:
+                        box_violations.append(f"{name}: init range [{min_val:.0f}, {max_val:.0f}] outside BOX [{spec['lower']:.0f}, {spec['upper']:.0f}]")
+                else:
+                    print(f"  {name:20s}: BOX_ASYM [{spec['lower']:.0f}, {spec['upper']:.0f}] h={spec['healthy']:.0f} (no samples)")
             else:
                 self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
-        
+
+        if box_violations:
+            print("\n⚠️  WARNING: BOX CONSTRAINT VIOLATIONS ⚠️")
+            for violation in box_violations:
+                print(f"    {violation}")
+            print("    These constraints will return goal=0 → loss=inf → crash!")
+            print("    ACTION: Widen BOX bounds to contain initialization values.\n")
+
         print("=" * 60 + "\n")
         self.calibrated = True
         self.samples = {name: [] for name in self.specs.keys()}

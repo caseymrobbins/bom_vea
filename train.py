@@ -1,4 +1,6 @@
-# train.py - v12: LPIPS + Consistency + Augmentation
+# train.py - v13: EXPLICIT structure/appearance separation
+# Core = STRUCTURE (edges, geometry)
+# Detail = APPEARANCE (colors, lighting)
 import os, sys, time, copy
 import torch
 import torch.nn.functional as F
@@ -11,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from configs.config import *
 from utils.data import load_from_config
 from models.vae import create_model
-from models.vgg import VGGFeatures, LPIPSTexture
+from models.vgg import VGGFeatures
 from losses.goals import GoalSystem
 from losses.bom_loss import compute_raw_losses, grouped_bom_loss, check_tensor
 from utils.viz import plot_group_balance, plot_reconstructions, plot_traversals, plot_cross_reconstruction, plot_training_history
@@ -21,42 +23,35 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 print(f"Device: {DEVICE}")
 if DEVICE == 'cuda': print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-# Install LPIPS if needed
-try:
-    import lpips
-except ImportError:
-    os.system("pip install lpips -q")
-    import lpips
-
 train_loader, data_info = load_from_config()
 model = create_model(LATENT_DIM, IMAGE_CHANNELS, DEVICE)
 optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-5)
 
 vgg = VGGFeatures(DEVICE)
-lpips_fn = LPIPSTexture(DEVICE)
 goal_system = GoalSystem(GOAL_SPECS)
 split_idx = LATENT_DIM // 2
 
-# Augmentation for consistency loss
-from torchvision import transforms
-aug_transform = transforms.Compose([
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
-])
+# Augmentation for consistency loss - batched on GPU
+import torchvision.transforms as T
+
+aug_transform = torch.nn.Sequential(
+    T.RandomHorizontalFlip(p=0.5),
+    T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+).to(DEVICE)
 
 def apply_augmentation(x):
-    """Apply augmentation to batch for consistency loss."""
-    return torch.stack([aug_transform(img) for img in x])
+    return aug_transform(x)
 
 histories = {
     'loss': [], 'min_group': [], 'bottleneck': [], 'ssim': [], 'mse': [], 'edge': [],
     'kl_raw': [], 'detail_ratio_raw': [], 'core_var_raw': [], 'detail_var_raw': [],
     'core_var_max_raw': [], 'detail_var_max_raw': [], 'consistency_raw': [],
-    'texture_loss': [], 'texture_dist_x2': [], 'texture_dist_x1': [],
+    'structure_loss': [], 'appearance_loss': [], 'color_hist_loss': [],
     **{f'group_{n}': [] for n in GROUP_NAMES},
     'pixel': [], 'edge_goal': [], 'perceptual': [],
-    'core_mse': [], 'core_edge': [], 'cross': [], 'texture_contrastive': [], 'texture_match': [],
+    'core_mse': [], 'core_edge': [],
+    'swap_structure': [], 'swap_appearance': [], 'swap_color_hist': [],
     'kl_goal': [], 'cov_goal': [], 'weak': [], 'consistency_goal': [],
     'detail_ratio_goal': [], 'core_var_goal': [], 'detail_var_goal': [],
     'core_var_max_goal': [], 'detail_var_max_goal': [],
@@ -65,8 +60,10 @@ histories = {
 dim_variance_history = {'core': [], 'detail': []}
 
 print("\n" + "=" * 100)
-print(f"BOM VAE v12 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
-print("v12: + LPIPS texture + Consistency Regularization + Data Augmentation")
+print(f"BOM VAE v13 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
+print("v13: EXPLICIT structure/appearance separation")
+print("     Core = STRUCTURE (edges match x1)")
+print("     Detail = APPEARANCE (colors match x2)")
 print("=" * 100 + "\n")
 
 last_good_state = copy.deepcopy(model.state_dict())
@@ -92,15 +89,15 @@ for epoch in range(1, EPOCHS + 1):
         x = x.to(DEVICE, non_blocking=True)
         if not check_tensor(x): skip_count += 1; continue
         
-        # Create augmented version for consistency loss
-        x_aug = apply_augmentation(x)
+        with torch.no_grad():
+            x_aug = apply_augmentation(x)
         
         optimizer.zero_grad(set_to_none=True)
         recon, mu, logvar, z = model(x)
         
         if needs_recal and batch_idx < CALIBRATION_BATCHES:
             with torch.no_grad():
-                raw = compute_raw_losses(recon, x, mu, logvar, z, model, vgg, lpips_fn, split_idx, x_aug)
+                raw = compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, x_aug)
                 goal_system.collect(raw)
             if not goal_system.calibrated:
                 F.mse_loss(recon, x).backward()
@@ -113,11 +110,12 @@ for epoch in range(1, EPOCHS + 1):
             goal_system.calibrate(epoch=epoch)
             needs_recal = False
         
-        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, lpips_fn, split_idx, GROUP_NAMES, x_aug)
+        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, x_aug)
         
         if result is None:
             skip_count += 1
             if skip_count > 10:
+                print("Warning: Stability issue. Reloading last good state.")
                 model.load_state_dict(last_good_state)
                 optimizer.load_state_dict(last_good_optimizer)
                 nan_count += 1; skip_count = 0
@@ -156,9 +154,9 @@ for epoch in range(1, EPOCHS + 1):
             
             for k in ['kl_raw', 'detail_ratio_raw', 'core_var_raw', 'detail_var_raw', 'core_var_max_raw', 'detail_var_max_raw', 'consistency_raw']:
                 epoch_data[k].append(rv.get(k, 0))
-            epoch_data['texture_loss'].append(rv['texture_loss'])
-            epoch_data['texture_dist_x2'].append(rv['dist_x2'])
-            epoch_data['texture_dist_x1'].append(rv['dist_x1'])
+            epoch_data['structure_loss'].append(rv['structure_loss'])
+            epoch_data['appearance_loss'].append(rv['appearance_loss'])
+            epoch_data['color_hist_loss'].append(rv['color_hist_loss'])
             
             for n in GROUP_NAMES: epoch_data[f'group_{n}'].append(gv[n])
             bn_counts[GROUP_NAMES[result['min_idx'].item()]] += 1
@@ -168,9 +166,9 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['perceptual'].append(ig['perceptual'])
             epoch_data['core_mse'].append(ig['core_mse'])
             epoch_data['core_edge'].append(ig['core_edge'])
-            epoch_data['cross'].append(ig['cross'])
-            epoch_data['texture_contrastive'].append(ig['texture_contrastive'])
-            epoch_data['texture_match'].append(ig['texture_match'])
+            epoch_data['swap_structure'].append(ig['swap_structure'])
+            epoch_data['swap_appearance'].append(ig['swap_appearance'])
+            epoch_data['swap_color_hist'].append(ig['swap_color_hist'])
             epoch_data['kl_goal'].append(ig['kl'])
             epoch_data['cov_goal'].append(ig['cov'])
             epoch_data['weak'].append(ig['weak'])
@@ -186,7 +184,10 @@ for epoch in range(1, EPOCHS + 1):
             'bn': GROUP_NAMES[result['min_idx'].item()], 'ssim': f"{result['ssim']:.3f}",
         })
 
-    if nan_count > 5: break
+    if nan_count > 5: 
+        print("Too many instability issues. Stopping.")
+        break
+        
     scheduler.step()
     last_good_state = copy.deepcopy(model.state_dict())
     last_good_optimizer = copy.deepcopy(optimizer.state_dict())
@@ -208,14 +209,15 @@ for epoch in range(1, EPOCHS + 1):
         elif epoch_data[k]: histories[k].append(np.mean(epoch_data[k]))
         else: histories[k].append(histories[k][-1] if histories[k] else 0)
 
-    d2, d1 = histories['texture_dist_x2'][-1], histories['texture_dist_x1'][-1]
+    struct = histories['structure_loss'][-1]
+    appear = histories['appearance_loss'][-1]
     print(f"\nEpoch {epoch:2d} | Loss: {histories['loss'][-1]:.3f} | Min: {histories['min_group'][-1]:.3f} | SSIM: {histories['ssim'][-1]:.3f}")
-    print(f"         Texture: d(x2)={d2:.3f} d(x1)={d1:.3f} gap={d1-d2:.3f}")
+    print(f"         Structure: {struct:.4f} | Appearance: {appear:.4f}")
     print(f"         Groups: " + " | ".join(f"{n}:{histories[f'group_{n}'][-1]:.2f}" for n in GROUP_NAMES))
 
 # SAVE
-torch.save({'model': model.state_dict(), 'histories': histories, 'scales': goal_system.scales, 'dim_var': dim_variance_history}, f'{OUTPUT_DIR}/bom_vae_v12.pt')
-print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v12.pt")
+torch.save({'model': model.state_dict(), 'histories': histories, 'scales': goal_system.scales, 'dim_var': dim_variance_history}, f'{OUTPUT_DIR}/bom_vae_v13.pt')
+print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v13.pt")
 
 # EVAL
 print("\n" + "=" * 60 + "\nEVALUATION\n" + "=" * 60)
@@ -248,7 +250,7 @@ print(f"\n  MSE:   {mse_t/(cnt*3*64*64):.6f}\n  SSIM:  {np.mean(ss):.4f}\n  LPIP
 # VIZ
 print("\nGenerating visualizations...")
 samples, _ = next(iter(train_loader))
-plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v12 - {data_info['name']}")
+plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v13 - {data_info['name']}")
 plot_reconstructions(model, samples, split_idx, f'{OUTPUT_DIR}/reconstructions.png', DEVICE)
 plot_traversals(model, samples, split_idx, f'{OUTPUT_DIR}/traversals_core.png', f'{OUTPUT_DIR}/traversals_detail.png', NUM_TRAVERSE_DIMS, DEVICE)
 plot_cross_reconstruction(model, samples, split_idx, f'{OUTPUT_DIR}/cross_reconstruction.png', DEVICE)

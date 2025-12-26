@@ -1,5 +1,6 @@
 # losses/bom_loss.py
-# v12: Added LPIPS texture + consistency loss
+# v13: EXPLICIT structure/appearance separation
+# r_sw should have: x1's STRUCTURE + x2's APPEARANCE
 
 import torch
 import torch.nn.functional as F
@@ -15,9 +16,48 @@ def _get_sobel(device):
     return _sobel_x, _sobel_y
 
 def edges(img):
+    """Extract edge map - captures STRUCTURE."""
     sobel_x, sobel_y = _get_sobel(img.device)
     g = img.mean(1, keepdim=True)
     return (F.conv2d(g, sobel_x, padding=1).pow(2) + F.conv2d(g, sobel_y, padding=1).pow(2)).sqrt()
+
+def mean_color(img):
+    """Global mean color per channel - captures overall APPEARANCE."""
+    return img.mean(dim=[2, 3])  # (B, 3)
+
+def color_histogram(img, bins=16):
+    """Color histogram - captures color distribution / APPEARANCE."""
+    B, C, H, W = img.shape
+    img_flat = img.view(B, C, -1)  # (B, 3, H*W)
+    
+    # Compute histogram per channel
+    histograms = []
+    for c in range(C):
+        # Soft histogram using gaussian kernels
+        pixels = img_flat[:, c, :]  # (B, H*W)
+        bin_centers = torch.linspace(0, 1, bins, device=img.device)  # (bins,)
+        
+        # Distance from each pixel to each bin center
+        diff = pixels.unsqueeze(-1) - bin_centers.view(1, 1, -1)  # (B, H*W, bins)
+        weights = torch.exp(-diff.pow(2) / 0.01)  # soft assignment
+        hist = weights.sum(dim=1)  # (B, bins)
+        hist = hist / (hist.sum(dim=1, keepdim=True) + 1e-8)  # normalize
+        histograms.append(hist)
+    
+    return torch.cat(histograms, dim=1)  # (B, 3*bins)
+
+def spatial_color_map(img, grid_size=4):
+    """Spatial color - captures local appearance / lighting."""
+    # Downsample to grid_size x grid_size and flatten
+    downsampled = F.adaptive_avg_pool2d(img, grid_size)  # (B, 3, grid, grid)
+    return downsampled.view(img.shape[0], -1)  # (B, 3*grid*grid)
+
+def luminance_map(img):
+    """Luminance/brightness map - captures lighting pattern."""
+    # Convert to grayscale luminance
+    lum = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
+    # Downsample to capture broad lighting
+    return F.adaptive_avg_pool2d(lum, 8)  # (B, 1, 8, 8)
 
 def compute_ssim(x, y, window_size=11):
     C1, C2 = 0.01**2, 0.03**2
@@ -36,15 +76,7 @@ def compute_ssim(x, y, window_size=11):
 def check_tensor(t):
     return not (torch.isnan(t).any() or torch.isinf(t).any())
 
-def compute_texture_loss_lpips(r_sw, x1, x2, lpips_fn):
-    """LPIPS-based texture loss."""
-    dist_to_x2 = lpips_fn(r_sw, x2)
-    dist_to_x1 = lpips_fn(r_sw, x1)
-    margin = 0.02  # LPIPS scale is smaller
-    contrastive_loss = F.relu(dist_to_x2 - dist_to_x1 + margin)
-    return contrastive_loss.mean(), dist_to_x2.mean(), dist_to_x1.mean()
-
-def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, lpips_fn, split_idx, x_aug=None):
+def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, x_aug=None):
     """Compute all raw losses for calibration."""
     B = x.shape[0]
     z_core, z_detail = z[:, :split_idx], z[:, split_idx:]
@@ -71,21 +103,26 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, lpips_fn, split_idx,
     losses['core_mse'] = F.mse_loss(recon_core, x).item()
     losses['core_edge'] = F.mse_loss(edges(recon_core), edges_x).item()
     
+    # v13: EXPLICIT structure/appearance on swapped reconstruction
     if B >= 4:
-        h = B // 2
-        z1_c, z2_d = z_core[:h], z_detail[h:2*h]
-        x1, x2 = x[:h], x[h:2*h]
-        z_sw = torch.cat([z1_c, z2_d], dim=1)
+        # Random permutation for robust pairing
+        perm = torch.randperm(B, device=x.device)
+        x1, x2 = x, x[perm]
+        z1_core, z2_detail = z_core, z_detail[perm]
+        
+        z_sw = torch.cat([z1_core, z2_detail], dim=1)
         r_sw = torch.clamp(model.decode(z_sw), 0, 1)
-        losses['cross'] = (F.mse_loss(r_sw, x1) + F.mse_loss(edges(r_sw), edges(x1))).item()
-        with torch.no_grad():
-            tex_loss, dist_x2, _ = compute_texture_loss_lpips(r_sw, x1, x2, lpips_fn)
-        losses['texture_contrastive'] = tex_loss.item()
-        losses['texture_match'] = dist_x2.item()
+        
+        # STRUCTURE from x1: edges should match
+        losses['swap_structure'] = F.mse_loss(edges(r_sw), edges(x1)).item()
+        
+        # APPEARANCE from x2: colors should match
+        losses['swap_appearance'] = F.mse_loss(mean_color(r_sw), mean_color(x2)).item()
+        losses['swap_color_hist'] = F.mse_loss(color_histogram(r_sw), color_histogram(x2)).item()
     else:
-        losses['cross'] = 0.1
-        losses['texture_contrastive'] = 0.1
-        losses['texture_match'] = 0.1
+        losses['swap_structure'] = 0.1
+        losses['swap_appearance'] = 0.01
+        losses['swap_color_hist'] = 0.01
     
     kl_per_dim = torch.clamp(-0.5 * (1 + logvar_core - mu_core.pow(2) - logvar_core.exp()), 0, 50)
     losses['kl'] = kl_per_dim.sum(dim=1).mean().item()
@@ -97,7 +134,6 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, lpips_fn, split_idx,
     losses['cov'] = torch.clamp((cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum(), 0, 50).item()
     losses['weak'] = (mu_core.var(0) < 0.1).float().mean().item()
     
-    # v12: Core consistency
     if x_aug is not None:
         with torch.no_grad():
             mu_aug, _ = model.encode(x_aug)
@@ -116,8 +152,8 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, lpips_fn, split_idx,
     
     return losses
 
-def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, lpips_fn, split_idx, group_names, x_aug=None):
-    """Compute BOM loss with grouped goals. v12: + LPIPS + consistency."""
+def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, x_aug=None):
+    """Compute BOM loss with grouped goals. v13: EXPLICIT structure/appearance."""
     if not all([check_tensor(t) for t in [recon, x, mu, logvar, z]]):
         return None
     
@@ -151,27 +187,33 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, lpips_fn, split
     g_core_mse = goals.goal(F.mse_loss(recon_core, x), 'core_mse')
     g_core_edge = goals.goal(F.mse_loss(edges(recon_core), edges_x), 'core_edge')
     
+    # GROUP C: SWAP - EXPLICIT structure/appearance separation
     if B >= 4:
-        h = B // 2
-        z1_c, z2_d = z_core[:h], z_detail[h:2*h]
-        x1, x2 = x[:h], x[h:2*h]
-        z_sw = torch.cat([z1_c, z2_d], dim=1)
+        # Random permutation for robust pairing
+        perm = torch.randperm(B, device=x.device)
+        x1, x2 = x, x[perm]
+        z1_core, z2_detail = z_core, z_detail[perm]
+        
+        z_sw = torch.cat([z1_core, z2_detail], dim=1)
         r_sw = torch.clamp(model.decode(z_sw), 0, 1)
         
-        cross_loss = F.mse_loss(r_sw, x1) + F.mse_loss(edges(r_sw), edges(x1))
-        g_cross = goals.goal(cross_loss, 'cross')
+        # STRUCTURE from x1: edges should match
+        structure_loss = F.mse_loss(edges(r_sw), edges(x1))
+        g_swap_structure = goals.goal(structure_loss, 'swap_structure')
         
-        # v12: LPIPS texture
-        texture_loss, dist_to_x2, dist_to_x1 = compute_texture_loss_lpips(r_sw, x1, x2, lpips_fn)
-        g_texture_contrastive = goals.goal(texture_loss, 'texture_contrastive')
-        g_texture_match = goals.goal(dist_to_x2, 'texture_match')
+        # APPEARANCE from x2: colors should match
+        appearance_loss = F.mse_loss(mean_color(r_sw), mean_color(x2))
+        g_swap_appearance = goals.goal(appearance_loss, 'swap_appearance')
+        
+        color_hist_loss = F.mse_loss(color_histogram(r_sw), color_histogram(x2))
+        g_swap_color_hist = goals.goal(color_hist_loss, 'swap_color_hist')
     else:
-        g_cross = torch.tensor(0.5, device=x.device)
-        g_texture_contrastive = torch.tensor(0.5, device=x.device)
-        g_texture_match = torch.tensor(0.5, device=x.device)
-        texture_loss = dist_to_x2 = dist_to_x1 = torch.tensor(0.0, device=x.device)
+        g_swap_structure = torch.tensor(0.5, device=x.device)
+        g_swap_appearance = torch.tensor(0.5, device=x.device)
+        g_swap_color_hist = torch.tensor(0.5, device=x.device)
+        structure_loss = appearance_loss = color_hist_loss = torch.tensor(0.0, device=x.device)
 
-    # GROUP C: LATENT QUALITY
+    # GROUP D: LATENT QUALITY
     kl_per_dim = torch.clamp(-0.5 * (1 + logvar_core - mu_core.pow(2) - logvar_core.exp()), 0, 50)
     kl_core = kl_per_dim.sum(dim=1).mean()
     g_kl = goals.goal(kl_core, 'kl')
@@ -183,7 +225,6 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, lpips_fn, split
     g_cov = goals.goal(cov_penalty, 'cov')
     g_weak = goals.goal((mu_core.var(0) < 0.1).float().mean(), 'weak')
     
-    # v12: Core consistency loss
     if x_aug is not None:
         mu_aug, _ = model.encode(x_aug)
         mu_aug_core = mu_aug[:, :split_idx]
@@ -193,7 +234,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, lpips_fn, split
         g_consistency = torch.tensor(0.5, device=x.device)
         consistency_loss = torch.tensor(0.0, device=x.device)
 
-    # GROUP D: HEALTH
+    # GROUP E: HEALTH
     detail_contrib = (recon - recon_core).abs().mean()
     detail_ratio = detail_contrib / (recon_core.abs().mean() + 1e-8)
     g_detail_ratio = goals.goal(detail_ratio, 'detail_ratio')
@@ -206,13 +247,14 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, lpips_fn, split
     g_core_var_max = goals.goal(core_var_max, 'core_var_max')
     g_detail_var_max = goals.goal(detail_var_max, 'detail_var_max')
 
-    # GROUPED BOM - consistency in latent group
+    # GROUPED BOM - now with explicit SWAP group
     group_recon = geometric_mean([g_pixel, g_edge, g_perceptual])
-    group_core = geometric_mean([g_core_mse, g_core_edge, g_cross, g_texture_contrastive, g_texture_match])
+    group_core = geometric_mean([g_core_mse, g_core_edge])
+    group_swap = geometric_mean([g_swap_structure, g_swap_appearance, g_swap_color_hist])
     group_latent = geometric_mean([g_kl, g_cov, g_weak, g_consistency])
     group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var, g_core_var_max, g_detail_var_max])
     
-    groups = torch.stack([group_recon, group_core, group_latent, group_health])
+    groups = torch.stack([group_recon, group_core, group_swap, group_latent, group_health])
     if torch.isnan(groups).any() or torch.isinf(groups).any(): return None
     
     min_group = groups.min()
@@ -223,9 +265,9 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, lpips_fn, split
     individual_goals = {
         'pixel': g_pixel.item(), 'edge': g_edge.item(), 'perceptual': g_perceptual.item(),
         'core_mse': g_core_mse.item(), 'core_edge': g_core_edge.item(),
-        'cross': g_cross.item() if isinstance(g_cross, torch.Tensor) else g_cross,
-        'texture_contrastive': g_texture_contrastive.item() if isinstance(g_texture_contrastive, torch.Tensor) else g_texture_contrastive,
-        'texture_match': g_texture_match.item() if isinstance(g_texture_match, torch.Tensor) else g_texture_match,
+        'swap_structure': g_swap_structure.item() if isinstance(g_swap_structure, torch.Tensor) else g_swap_structure,
+        'swap_appearance': g_swap_appearance.item() if isinstance(g_swap_appearance, torch.Tensor) else g_swap_appearance,
+        'swap_color_hist': g_swap_color_hist.item() if isinstance(g_swap_color_hist, torch.Tensor) else g_swap_color_hist,
         'kl': g_kl.item(), 'cov': g_cov.item(), 'weak': g_weak.item(),
         'consistency': g_consistency.item() if isinstance(g_consistency, torch.Tensor) else g_consistency,
         'detail_ratio': g_detail_ratio.item(),
@@ -239,9 +281,9 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, lpips_fn, split
         'kl_raw': kl_core.item(), 'detail_ratio_raw': detail_ratio.item(),
         'core_var_raw': core_var_median.item(), 'detail_var_raw': detail_var_median.item(),
         'core_var_max_raw': core_var_max.item(), 'detail_var_max_raw': detail_var_max.item(),
-        'texture_loss': texture_loss.item() if isinstance(texture_loss, torch.Tensor) else texture_loss,
-        'dist_x2': dist_to_x2.item() if isinstance(dist_to_x2, torch.Tensor) else dist_to_x2,
-        'dist_x1': dist_to_x1.item() if isinstance(dist_to_x1, torch.Tensor) else dist_to_x1,
+        'structure_loss': structure_loss.item() if isinstance(structure_loss, torch.Tensor) else structure_loss,
+        'appearance_loss': appearance_loss.item() if isinstance(appearance_loss, torch.Tensor) else appearance_loss,
+        'color_hist_loss': color_hist_loss.item() if isinstance(color_hist_loss, torch.Tensor) else color_hist_loss,
         'consistency_raw': consistency_loss.item() if isinstance(consistency_loss, torch.Tensor) else consistency_loss,
     }
     

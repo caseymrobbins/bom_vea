@@ -1,11 +1,10 @@
 # configs/config.py
-# v12: + LPIPS texture + Consistency Regularization + Data Augmentation
+# v13: Explicit structure/appearance separation
 
 import torch
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# GPU optimizations
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -13,7 +12,7 @@ if torch.cuda.is_available():
 
 # Training
 EPOCHS = 30
-BATCH_SIZE = 256  # A100 can handle more
+BATCH_SIZE = 256
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-5
 CALIBRATION_BATCHES = 200
@@ -29,14 +28,12 @@ DATA_PATH = '/content/celeba'
 ZIP_PATH = '/content/img_align_celeba.zip'
 
 # Output
-OUTPUT_DIR = '/content/outputs_bom_v12'
+OUTPUT_DIR = '/content/outputs_bom_v13'
 EVAL_SAMPLES = 10000
 NUM_TRAVERSE_DIMS = 15
 
-# v12: Enable augmentation
 USE_AUGMENTATION = True
 
-# Constraint types
 from enum import Enum
 
 class ConstraintType(Enum):
@@ -48,19 +45,21 @@ class ConstraintType(Enum):
     MINIMIZE_HARD = "min_hard"
 
 GOAL_SPECS = {
-    # Reconstruction group
+    # Reconstruction group - full image quality
     'pixel': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'edge': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'perceptual': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     
-    # Core group - structure + texture
+    # Core group - structure preservation
     'core_mse': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'core_edge': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
-    'cross': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
-    'texture_contrastive': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
-    'texture_match': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     
-    # Latent group + consistency
+    # v13: EXPLICIT separation - structure from x1, appearance from x2
+    'swap_structure': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # edges(r_sw) ≈ edges(x1)
+    'swap_appearance': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # colors(r_sw) ≈ colors(x2)
+    'swap_color_hist': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # histogram(r_sw) ≈ histogram(x2)
+    
+    # Latent group
     'kl': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 8000, 'healthy': 2000},
     'cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'weak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.1},
@@ -75,4 +74,4 @@ GOAL_SPECS = {
 }
 
 RECALIBRATION_EPOCHS = []
-GROUP_NAMES = ['recon', 'core', 'latent', 'health']
+GROUP_NAMES = ['recon', 'core', 'swap', 'latent', 'health']

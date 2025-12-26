@@ -62,7 +62,7 @@ class ConvVAE(nn.Module):
 
     def encode(self, x):
         h = self.enc(x)
-        mu = self.mu(h)
+        mu = torch.clamp(self.mu(h), -10, 10)  # v14: Clamp mu to prevent explosion
         logvar = torch.clamp(self.logvar(h), -8, 3)
         return mu, logvar
     

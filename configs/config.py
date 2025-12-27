@@ -68,7 +68,11 @@ GOAL_SPECS = {
     'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # D should classify recon as real
     'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},   # D should classify swap as real
 
-    # Latent group - BOTH core and detail now have KL! (Conservative bounds for stable init)
+    # NEW: Disentanglement group - behavioral walls (what core/detail actually DO)
+    'core_color_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # Δz_core shouldn't change colors
+    'detail_edge_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # Δz_detail shouldn't change edges
+
+    # Latent group - KL and statistical health
     'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 5000, 'healthy': 1500},
     'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 5000, 'healthy': 1500},
     'cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
@@ -89,4 +93,4 @@ GOAL_SPECS = {
 }
 
 RECALIBRATION_EPOCHS = []
-GROUP_NAMES = ['recon', 'core', 'swap', 'realism', 'latent', 'health']
+GROUP_NAMES = ['recon', 'core', 'swap', 'realism', 'disentangle', 'latent', 'health']

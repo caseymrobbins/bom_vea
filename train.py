@@ -57,12 +57,14 @@ histories = {
     'core_var_max_raw': [], 'detail_var_max_raw': [], 'consistency_raw': [],
     'structure_loss': [], 'appearance_loss': [], 'color_hist_loss': [],
     'realism_recon_raw': [], 'realism_swap_raw': [],
+    'core_color_leak_raw': [], 'detail_edge_leak_raw': [],
     'detail_mean_raw': [], 'detail_var_mean_raw': [], 'detail_cov_raw': [],
     **{f'group_{n}': [] for n in GROUP_NAMES},
     'pixel': [], 'edge_goal': [], 'perceptual': [],
     'core_mse': [], 'core_edge': [],
     'swap_structure': [], 'swap_appearance': [], 'swap_color_hist': [],
     'realism_recon': [], 'realism_swap': [],
+    'core_color_leak': [], 'detail_edge_leak': [],
     'kl_core_goal': [], 'kl_detail_goal': [],
     'cov_goal': [], 'weak': [], 'consistency_goal': [],
     'detail_mean_goal': [], 'detail_var_mean_goal': [], 'detail_cov_goal': [],
@@ -74,14 +76,12 @@ dim_variance_history = {'core': [], 'detail': []}
 
 print("\n" + "=" * 100)
 print(f"BOM VAE v15 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
-print("v15: Tightened constraints + Softmin A/B test")
-print("     - Based on v14: Discriminator + Detail contracts")
+print("v15: Behavioral disentanglement walls (intervention testing)")
+print("     - NEW: Direct leak detection (core→color, detail→edge)")
 print("     - PatchGAN discriminator with spectral norm")
 print("     - KL divergence for BOTH core and detail channels")
-print("     - Detail contracts: mean, variance, covariance")
-print(f"\nA/B TEST: {'SOFTMIN' if USE_SOFTMIN else 'HARD MIN'} barrier")
-if USE_SOFTMIN:
-    print(f"          Temperature = {SOFTMIN_TEMPERATURE} (lower = sharper, higher = smoother)")
+print("     - No clamps, fail-fast on barrier violations")
+print(f"\nBOM: {'SOFTMIN' if USE_SOFTMIN else 'HARD MIN'} barrier (softmin disabled - unstable)")
 print("=" * 100 + "\n")
 
 # BOM: No "last good state" safety net - let barrier violations crash loudly

@@ -47,9 +47,10 @@ class ConvVAE(nn.Module):
         
         self.mu = nn.Linear(512 * 4 * 4, latent_dim)
         self.logvar = nn.Linear(512 * 4 * 4, latent_dim)
-        # Init for higher KL at start: logvar=2.0 gives ~2.2 KL/dim * 64 dims = ~140 KL (in BOX [100,5000])
-        nn.init.normal_(self.mu.weight, 0, 0.001); nn.init.zeros_(self.mu.bias)
-        nn.init.normal_(self.logvar.weight, 0, 0.001); nn.init.constant_(self.logvar.bias, 2.0)
+        # Conservative init for stable KL: logvar=1.0 gives ~0.36 KL/dim * 64 = ~23 total
+        # With small weight noise, actual init KL ~50-80 (within BOX [50,5000])
+        nn.init.normal_(self.mu.weight, 0, 0.01); nn.init.zeros_(self.mu.bias)
+        nn.init.normal_(self.logvar.weight, 0, 0.01); nn.init.constant_(self.logvar.bias, 1.0)
         
         self.dec_lin = nn.Linear(latent_dim, 512 * 4 * 4)
         self.dec = nn.Sequential(

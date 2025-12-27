@@ -92,5 +92,5 @@ GOAL_SPECS = {
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
 }
 
-RECALIBRATION_EPOCHS = []
+RECALIBRATION_EPOCHS = [15]  # Tighten constraints mid-training
 GROUP_NAMES = ['recon', 'core', 'swap', 'realism', 'disentangle', 'latent', 'health']

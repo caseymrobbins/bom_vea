@@ -84,11 +84,11 @@ if USE_SOFTMIN:
     print(f"          Temperature = {SOFTMIN_TEMPERATURE} (lower = sharper, higher = smoother)")
 print("=" * 100 + "\n")
 
-last_good_state = copy.deepcopy(model.state_dict())
-last_good_state_d = copy.deepcopy(discriminator.state_dict())
-last_good_optimizer = copy.deepcopy(optimizer.state_dict())
-last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
-nan_count = 0
+# BOM: No "last good state" safety net - let barrier violations crash loudly
+# last_good_state = copy.deepcopy(model.state_dict())
+# last_good_state_d = copy.deepcopy(discriminator.state_dict())
+# last_good_optimizer = copy.deepcopy(optimizer.state_dict())
+# last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
 
 for epoch in range(1, EPOCHS + 1):
     t0 = time.time()
@@ -151,26 +151,27 @@ for epoch in range(1, EPOCHS + 1):
             needs_recal = False
 
         result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug, USE_SOFTMIN, SOFTMIN_TEMPERATURE)
-        
+
+        # BOM philosophy: Let it crash loudly if constraints violated, don't mask with reloads
         if result is None:
-            skip_count += 1
-            if skip_count > 10:
-                print("Warning: Stability issue. Reloading last good state.")
-                model.load_state_dict(last_good_state)
-                discriminator.load_state_dict(last_good_state_d)
-                optimizer.load_state_dict(last_good_optimizer)
-                optimizer_d.load_state_dict(last_good_optimizer_d)
-                nan_count += 1; skip_count = 0
-                if nan_count > 5: break
-            continue
-        
+            print(f"ERROR: Loss computation failed (returned None) at epoch {epoch}, batch {batch_idx}")
+            print(f"This means a barrier was violated or NaN/Inf detected.")
+            print(f"Fix: Adjust initialization or widen BOX constraints, don't mask the crash.")
+            raise RuntimeError("BOM barrier violation - loss returned None")
+
         loss = result['loss']
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"ERROR: Loss is NaN/Inf at epoch {epoch}, batch {batch_idx}")
+            print(f"loss value: {loss.item()}")
+            raise RuntimeError("BOM barrier violation - loss is NaN/Inf")
+
         loss.backward()
-        
-        if any(p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()) for p in model.parameters()):
-            skip_count += 1; optimizer.zero_grad(set_to_none=True); continue
-        
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        # BOM philosophy: No grad clipping - if gradients explode, the barrier is wrong
+        # if any(p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()) for p in model.parameters()):
+        #     skip_count += 1; optimizer.zero_grad(set_to_none=True); continue
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
         optimizer.step()
         
         if batch_idx % 10 == 0:
@@ -178,12 +179,12 @@ for epoch in range(1, EPOCHS + 1):
                 all_mu_core.append(mu[:, :split_idx].cpu())
                 all_mu_detail.append(mu[:, split_idx:].cpu())
         
-        if batch_idx % 200 == 0 and batch_idx > 0:
-            last_good_state = copy.deepcopy(model.state_dict())
-            last_good_state_d = copy.deepcopy(discriminator.state_dict())
-            last_good_optimizer = copy.deepcopy(optimizer.state_dict())
-            last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
-            skip_count = 0
+        # BOM: No checkpointing "last good state" - let failures be visible
+        # if batch_idx % 200 == 0 and batch_idx > 0:
+        #     last_good_state = copy.deepcopy(model.state_dict())
+        #     last_good_state_d = copy.deepcopy(discriminator.state_dict())
+        #     last_good_optimizer = copy.deepcopy(optimizer.state_dict())
+        #     last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
 
         with torch.no_grad():
             groups = result['groups']

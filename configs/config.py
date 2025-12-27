@@ -60,26 +60,26 @@ GOAL_SPECS = {
     'swap_appearance': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # colors(r_sw) ≈ colors(x2)
     'swap_color_hist': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # histogram(r_sw) ≈ histogram(x2)
 
-    # v14: Realism group - discriminator goals
-    'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # D should classify recon as real
-    'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},   # D should classify swap as real
+    # v14: Realism group - discriminator goals (loosened scale)
+    'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},  # D should classify recon as real
+    'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},   # D should classify swap as real
 
-    # Latent group - BOTH core and detail now have KL!
-    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 8000, 'healthy': 2000},
-    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 8000, 'healthy': 2000},
+    # Latent group - BOTH core and detail now have KL! (widened ranges)
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 10, 'upper': 15000, 'healthy': 3000},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 10, 'upper': 15000, 'healthy': 3000},
     'cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'weak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.1},
     'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
-    # v14: Detail contracts - ensure detail channel has proper statistics
-    'detail_mean': {'type': ConstraintType.BOX, 'lower': -3.0, 'upper': 3.0},    # Mean should be near 0
-    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 10.0}, # Variance should be reasonable
-    'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},       # Low covariance
+    # v14: Detail contracts - ensure detail channel has proper statistics (loosened)
+    'detail_mean': {'type': ConstraintType.BOX, 'lower': -5.0, 'upper': 5.0},    # Mean should be near 0
+    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.01, 'upper': 20.0}, # Variance should be reasonable
+    'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.5},       # Low covariance (reduced influence)
 
-    # Health group
-    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.10, 'upper': 0.50},
-    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.5, 'upper': 50.0},
-    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.5, 'upper': 50.0},
+    # Health group (widened ranges)
+    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.05, 'upper': 0.60},
+    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 100.0},
+    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 100.0},
     'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
 }

@@ -10,9 +10,12 @@ if torch.cuda.is_available():
     torch.backends.cudnn.allow_tf32 = True
     torch.set_float32_matmul_precision('high')
 
+# A100 Optimizations
+USE_TORCH_COMPILE = True  # PyTorch 2.0+: Significant speedup on A100 (set False if PyTorch < 2.0)
+
 # Training
 EPOCHS = 30
-BATCH_SIZE = 256
+BATCH_SIZE = 512  # A100: Increased from 256 (40GB can handle 512-1024)
 LEARNING_RATE = 1e-3
 LEARNING_RATE_D = 1e-4  # Discriminator learning rate (slower)
 WEIGHT_DECAY = 1e-5

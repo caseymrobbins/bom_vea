@@ -60,26 +60,26 @@ GOAL_SPECS = {
     'swap_appearance': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # colors(r_sw) ≈ colors(x2)
     'swap_color_hist': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # histogram(r_sw) ≈ histogram(x2)
 
-    # v14: Realism group - discriminator goals (loosened scale)
-    'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},  # D should classify recon as real
-    'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},   # D should classify swap as real
+    # v14: Realism group - discriminator goals (TIGHTENED)
+    'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 2.0},  # D should classify recon as real
+    'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 2.0},   # D should classify swap as real
 
-    # Latent group - BOTH core and detail now have KL! (widened ranges)
-    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 10, 'upper': 15000, 'healthy': 3000},
-    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 10, 'upper': 15000, 'healthy': 3000},
+    # Latent group - BOTH core and detail now have KL! (TIGHTENED ranges)
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100, 'upper': 5000, 'healthy': 1500},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100, 'upper': 5000, 'healthy': 1500},
     'cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'weak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.1},
     'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
-    # v14: Detail contracts - ensure detail channel has proper statistics (loosened)
-    'detail_mean': {'type': ConstraintType.BOX, 'lower': -5.0, 'upper': 5.0},    # Mean should be near 0
-    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.01, 'upper': 20.0}, # Variance should be reasonable
-    'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.5},       # Low covariance (reduced influence)
+    # v14: Detail contracts - ensure detail channel has proper statistics (TIGHTENED)
+    'detail_mean': {'type': ConstraintType.BOX, 'lower': -1.5, 'upper': 1.5},    # Mean should be near 0
+    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.3, 'upper': 5.0}, # Variance should be reasonable
+    'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 2.0},       # Low covariance (stronger penalty)
 
-    # Health group (widened ranges)
-    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.05, 'upper': 0.60},
-    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 100.0},
-    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 100.0},
+    # Health group (TIGHTENED ranges)
+    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.15, 'upper': 0.40},
+    'core_var_health': {'type': ConstraintType.BOX, 'lower': 1.0, 'upper': 30.0},
+    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 1.0, 'upper': 30.0},
     'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
 }

@@ -1,5 +1,6 @@
 # losses/bom_loss.py
-# v14: Discriminator + Detail contracts
+# v15: Tightened constraints + Softmin A/B test
+# Based on v14: Discriminator + Detail contracts
 # r_sw should have: x1's STRUCTURE + x2's APPEARANCE
 
 import torch
@@ -87,7 +88,7 @@ def check_tensor(t):
     return not (torch.isnan(t).any() or torch.isinf(t).any())
 
 def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discriminator=None, x_aug=None):
-    """Compute all raw losses for calibration. v14: Added discriminator and detail contracts."""
+    """Compute all raw losses for calibration. v15: Includes discriminator and detail contracts from v14."""
     B = x.shape[0]
     z_core, z_detail = z[:, :split_idx], z[:, split_idx:]
     mu_core, mu_detail = mu[:, :split_idx], mu[:, split_idx:]
@@ -187,7 +188,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     return losses
 
 def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None, use_softmin=False, softmin_temperature=0.1):
-    """Compute BOM loss with grouped goals. v14: Discriminator + Detail contracts."""
+    """Compute BOM loss with grouped goals. v15: Adds softmin option, includes v14 discriminator + detail contracts."""
     if not all([check_tensor(t) for t in [recon, x, mu, logvar, z]]):
         return None
 

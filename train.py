@@ -1,4 +1,5 @@
-# train.py - v14: Discriminator + Detail contracts
+# train.py - v15: Tightened constraints + Softmin A/B test
+# Based on v14: Discriminator + Detail contracts
 # Core = STRUCTURE (edges, geometry)
 # Detail = APPEARANCE (colors, lighting)
 import os, sys, time, copy
@@ -73,7 +74,8 @@ dim_variance_history = {'core': [], 'detail': []}
 
 print("\n" + "=" * 100)
 print(f"BOM VAE v15 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
-print("v14: Discriminator + Detail contracts")
+print("v15: Tightened constraints + Softmin A/B test")
+print("     - Based on v14: Discriminator + Detail contracts")
 print("     - PatchGAN discriminator with spectral norm")
 print("     - KL divergence for BOTH core and detail channels")
 print("     - Detail contracts: mean, variance, covariance")
@@ -281,8 +283,8 @@ torch.save({
     'histories': histories,
     'scales': goal_system.scales,
     'dim_var': dim_variance_history
-}, f'{OUTPUT_DIR}/bom_vae_v14.pt')
-print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v14.pt")
+}, f'{OUTPUT_DIR}/bom_vae_v15.pt')
+print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v15.pt")
 
 # EVAL
 print("\n" + "=" * 60 + "\nEVALUATION\n" + "=" * 60)
@@ -315,7 +317,7 @@ print(f"\n  MSE:   {mse_t/(cnt*3*64*64):.6f}\n  SSIM:  {np.mean(ss):.4f}\n  LPIP
 # VIZ
 print("\nGenerating visualizations...")
 samples, _ = next(iter(train_loader))
-plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v14 - {data_info['name']}")
+plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v15 - {data_info['name']}")
 plot_reconstructions(model, samples, split_idx, f'{OUTPUT_DIR}/reconstructions.png', DEVICE)
 plot_traversals(model, samples, split_idx, f'{OUTPUT_DIR}/traversals_core.png', f'{OUTPUT_DIR}/traversals_detail.png', NUM_TRAVERSE_DIMS, DEVICE)
 plot_cross_reconstruction(model, samples, split_idx, f'{OUTPUT_DIR}/cross_reconstruction.png', DEVICE)

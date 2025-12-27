@@ -62,8 +62,8 @@ class ConvVAE(nn.Module):
 
     def encode(self, x):
         h = self.enc(x)
-        mu = torch.clamp(self.mu(h), -10, 10)  # v15: Clamp mu to prevent explosion (from v14)
-        logvar = torch.clamp(self.logvar(h), -8, 3)
+        mu = self.mu(h)  # v15: No clamp - let BOX constraints enforce bounds
+        logvar = self.logvar(h)  # v15: No clamp - let KL contract enforce bounds
         return mu, logvar
     
     def reparameterize(self, mu, logvar):

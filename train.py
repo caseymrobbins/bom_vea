@@ -1,7 +1,8 @@
-# train.py - v15: Tightened constraints + Softmin A/B test
+# train.py - v15: Progressive group-by-group tightening
 # Based on v14: Discriminator + Detail contracts
 # Core = STRUCTURE (edges, geometry)
 # Detail = APPEARANCE (colors, lighting)
+# v15: Tighten one group per epoch (epochs 15,17,19,21,23,25,27) to force focus
 import os, sys, time, copy
 import torch
 import torch.nn.functional as F
@@ -99,35 +100,49 @@ for epoch in range(1, EPOCHS + 1):
     
     needs_recal = epoch in RECALIBRATION_EPOCHS or epoch == 1
     if needs_recal:
-        # Tighten constraints at epoch 15
-        if epoch == 15:
-            print(f"\n🔧 Epoch {epoch}: TIGHTENING CONSTRAINTS...")
-            # Tighten KL bounds
-            GOAL_SPECS['kl_core']['lower'] = 100
-            GOAL_SPECS['kl_core']['upper'] = 3000
-            GOAL_SPECS['kl_core']['healthy'] = 1000
-            GOAL_SPECS['kl_detail']['lower'] = 100
-            GOAL_SPECS['kl_detail']['upper'] = 3000
-            GOAL_SPECS['kl_detail']['healthy'] = 1000
-            # Tighten detail contracts
-            GOAL_SPECS['detail_mean']['lower'] = -3.0
-            GOAL_SPECS['detail_mean']['upper'] = 3.0
-            GOAL_SPECS['detail_var_mean']['lower'] = 0.1
-            GOAL_SPECS['detail_var_mean']['upper'] = 15.0
-            # Tighten health constraints
-            GOAL_SPECS['detail_ratio']['lower'] = 0.05
-            GOAL_SPECS['detail_ratio']['upper'] = 0.50
-            GOAL_SPECS['core_var_health']['lower'] = 0.1
-            GOAL_SPECS['detail_var_health']['lower'] = 0.1
-            print(f"    KL: [100, 3000] healthy=1000")
-            print(f"    detail_mean: [-3, 3]")
-            print(f"    detail_var_mean: [0.1, 15]")
-            print(f"    detail_ratio: [0.05, 0.50]")
+        # Progressive tightening: one group at a time
+        if epoch in TIGHTENING_SCHEDULE:
+            target_group = TIGHTENING_SCHEDULE[epoch]
+            print(f"\n🔧 Epoch {epoch}: TIGHTENING '{target_group.upper()}' GROUP...")
+
+            if target_group == 'latent':
+                # Tighten KL bounds
+                GOAL_SPECS['kl_core']['lower'] = 100
+                GOAL_SPECS['kl_core']['upper'] = 3000
+                GOAL_SPECS['kl_core']['healthy'] = 1000
+                GOAL_SPECS['kl_detail']['lower'] = 100
+                GOAL_SPECS['kl_detail']['upper'] = 3000
+                GOAL_SPECS['kl_detail']['healthy'] = 1000
+                # Tighten detail contracts
+                GOAL_SPECS['detail_mean']['lower'] = -3.0
+                GOAL_SPECS['detail_mean']['upper'] = 3.0
+                GOAL_SPECS['detail_var_mean']['lower'] = 0.1
+                GOAL_SPECS['detail_var_mean']['upper'] = 15.0
+                print(f"    KL: [100, 3000] healthy=1000")
+                print(f"    detail_mean: [-3, 3]")
+                print(f"    detail_var_mean: [0.1, 15]")
+
+            elif target_group == 'health':
+                # Tighten health constraints
+                GOAL_SPECS['detail_ratio']['lower'] = 0.05
+                GOAL_SPECS['detail_ratio']['upper'] = 0.50
+                GOAL_SPECS['core_var_health']['lower'] = 0.1
+                GOAL_SPECS['detail_var_health']['lower'] = 0.1
+                print(f"    detail_ratio: [0.05, 0.50]")
+                print(f"    variance health: lower >= 0.1")
+
+            elif target_group in ['recon', 'core', 'swap', 'realism', 'disentangle']:
+                # These groups use MINIMIZE_SOFT with auto-scale
+                # Tightening means recalibrating to current performance
+                # This forces BOM to improve beyond current baseline
+                print(f"    Recalibrating MINIMIZE_SOFT goals in {target_group} group")
+                print(f"    (BOM will focus gradient here for 1-2 epochs)")
+
             # Reinitialize goal system with tightened specs
             goal_system = GoalSystem(GOAL_SPECS)
 
         goal_system.start_recalibration()
-        print(f"\n📊 Epoch {epoch}: Calibrating...")
+        print(f"\n📊 Epoch {epoch}: Calibrating {TIGHTENING_SCHEDULE.get(epoch, 'all groups')}...")
 
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")

@@ -68,22 +68,22 @@ GOAL_SPECS = {
     'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # D should classify recon as real
     'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},   # D should classify swap as real
 
-    # Latent group - BOTH core and detail now have KL! (TIGHTENED ranges)
-    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100, 'upper': 5000, 'healthy': 1500},
-    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100, 'upper': 5000, 'healthy': 1500},
+    # Latent group - BOTH core and detail now have KL! (Conservative bounds for stable init)
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 5000, 'healthy': 1500},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 5000, 'healthy': 1500},
     'cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'weak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.1},
     'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # v14: Detail contracts - feasible initialization
-    'detail_mean': {'type': ConstraintType.BOX, 'lower': -5.0, 'upper': 5.0},    # Mean should be near 0
-    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 20.0}, # Variance should be reasonable
+    'detail_mean': {'type': ConstraintType.BOX, 'lower': -10.0, 'upper': 10.0},    # Mean should be near 0
+    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.01, 'upper': 50.0}, # Variance should be reasonable
     'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 1.0},       # Low covariance
 
     # Health group (feasible initialization)
-    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.05, 'upper': 0.60},
-    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 50.0},
-    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 50.0},
+    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.01, 'upper': 0.60},
+    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.01, 'upper': 50.0},
+    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.01, 'upper': 50.0},
     'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
 }

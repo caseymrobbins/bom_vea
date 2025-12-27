@@ -6,6 +6,16 @@ import torch
 import torch.nn.functional as F
 from losses.goals import geometric_mean
 
+def softmin(x, temperature=0.1):
+    """Smooth approximation of min using LogSumExp trick.
+
+    softmin(x, T) = -T * log(sum(exp(-x / T)))
+
+    As T → 0, this approaches hard min(x).
+    As T → ∞, this approaches mean(x).
+    """
+    return -temperature * torch.logsumexp(-x / temperature, dim=0)
+
 _sobel_x, _sobel_y = None, None
 
 def _get_sobel(device):
@@ -176,7 +186,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
 
     return losses
 
-def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None):
+def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None, use_softmin=False, softmin_temperature=0.1):
     """Compute BOM loss with grouped goals. v14: Discriminator + Detail contracts."""
     if not all([check_tensor(t) for t in [recon, x, mu, logvar, z]]):
         return None
@@ -313,9 +323,16 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_latent, group_health])
     if torch.isnan(groups).any() or torch.isinf(groups).any(): return None
 
-    min_group = groups.min()
-    min_group_idx = groups.argmin()
-    loss = -torch.log(min_group)  # v14: Pure log barrier, no epsilon!
+    if use_softmin:
+        # Softmin: smooth approximation of min for better gradient flow
+        min_group = softmin(groups, softmin_temperature)
+        min_group_idx = groups.argmin()  # Still track which group is weakest
+        loss = -torch.log(min_group + 1e-8)  # Small epsilon for numerical stability
+    else:
+        # Hard min: original BOM barrier
+        min_group = groups.min()
+        min_group_idx = groups.argmin()
+        loss = -torch.log(min_group)  # Pure log barrier, no epsilon!
     if torch.isnan(loss): return None
 
     individual_goals = {

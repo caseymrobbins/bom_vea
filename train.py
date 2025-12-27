@@ -72,11 +72,14 @@ histories = {
 dim_variance_history = {'core': [], 'detail': []}
 
 print("\n" + "=" * 100)
-print(f"BOM VAE v14 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
+print(f"BOM VAE v15 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
 print("v14: Discriminator + Detail contracts")
 print("     - PatchGAN discriminator with spectral norm")
 print("     - KL divergence for BOTH core and detail channels")
 print("     - Detail contracts: mean, variance, covariance")
+print(f"\nA/B TEST: {'SOFTMIN' if USE_SOFTMIN else 'HARD MIN'} barrier")
+if USE_SOFTMIN:
+    print(f"          Temperature = {SOFTMIN_TEMPERATURE} (lower = sharper, higher = smoother)")
 print("=" * 100 + "\n")
 
 last_good_state = copy.deepcopy(model.state_dict())
@@ -145,7 +148,7 @@ for epoch in range(1, EPOCHS + 1):
             goal_system.calibrate(epoch=epoch)
             needs_recal = False
 
-        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
+        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug, USE_SOFTMIN, SOFTMIN_TEMPERATURE)
         
         if result is None:
             skip_count += 1

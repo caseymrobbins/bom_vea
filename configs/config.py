@@ -35,6 +35,10 @@ NUM_TRAVERSE_DIMS = 15
 
 USE_AUGMENTATION = True
 
+# A/B Testing: Softmin vs Hard Min
+USE_SOFTMIN = True  # True = softmin, False = hard min
+SOFTMIN_TEMPERATURE = 0.1  # Lower = closer to hard min, higher = smoother
+
 from enum import Enum
 
 class ConstraintType(Enum):

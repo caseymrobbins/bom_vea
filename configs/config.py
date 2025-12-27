@@ -1,5 +1,5 @@
 # configs/config.py
-# v14: Discriminator + Detail contracts
+# v15: Loosened constraints for more model freedom
 
 import torch
 
@@ -29,7 +29,7 @@ DATA_PATH = '/content/celeba'
 ZIP_PATH = '/content/img_align_celeba.zip'
 
 # Output
-OUTPUT_DIR = '/content/outputs_bom_v14'
+OUTPUT_DIR = '/content/outputs_bom_v15'
 EVAL_SAMPLES = 10000
 NUM_TRAVERSE_DIMS = 15
 

@@ -71,7 +71,7 @@ class GoalSystem:
         print(f"CALIBRATING GOALS (#{self.calibration_count}, epoch {epoch})")
         print("=" * 60)
 
-        # v14: Verify BOX constraints contain initial values
+        # v15: Verify BOX constraints contain initial values (from v14)
         box_violations = []
 
         for name, spec in self.specs.items():

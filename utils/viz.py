@@ -1,4 +1,4 @@
-# utils/viz.py - v13 updated for structure/appearance
+# utils/viz.py - v15 (based on v13 structure/appearance updates)
 import matplotlib.pyplot as plt
 import numpy as np
 import torch

@@ -57,12 +57,14 @@ histories = {
     'core_var_max_raw': [], 'detail_var_max_raw': [], 'consistency_raw': [],
     'structure_loss': [], 'appearance_loss': [], 'color_hist_loss': [],
     'realism_recon_raw': [], 'realism_swap_raw': [],
+    'core_color_leak_raw': [], 'detail_edge_leak_raw': [],
     'detail_mean_raw': [], 'detail_var_mean_raw': [], 'detail_cov_raw': [],
     **{f'group_{n}': [] for n in GROUP_NAMES},
     'pixel': [], 'edge_goal': [], 'perceptual': [],
     'core_mse': [], 'core_edge': [],
     'swap_structure': [], 'swap_appearance': [], 'swap_color_hist': [],
     'realism_recon': [], 'realism_swap': [],
+    'core_color_leak': [], 'detail_edge_leak': [],
     'kl_core_goal': [], 'kl_detail_goal': [],
     'cov_goal': [], 'weak': [], 'consistency_goal': [],
     'detail_mean_goal': [], 'detail_var_mean_goal': [], 'detail_cov_goal': [],
@@ -74,14 +76,12 @@ dim_variance_history = {'core': [], 'detail': []}
 
 print("\n" + "=" * 100)
 print(f"BOM VAE v15 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
-print("v15: Tightened constraints + Softmin A/B test")
-print("     - Based on v14: Discriminator + Detail contracts")
+print("v15: Behavioral disentanglement walls (intervention testing)")
+print("     - NEW: Direct leak detection (core→color, detail→edge)")
 print("     - PatchGAN discriminator with spectral norm")
 print("     - KL divergence for BOTH core and detail channels")
-print("     - Detail contracts: mean, variance, covariance")
-print(f"\nA/B TEST: {'SOFTMIN' if USE_SOFTMIN else 'HARD MIN'} barrier")
-if USE_SOFTMIN:
-    print(f"          Temperature = {SOFTMIN_TEMPERATURE} (lower = sharper, higher = smoother)")
+print("     - No clamps, fail-fast on barrier violations")
+print(f"\nBOM: {'SOFTMIN' if USE_SOFTMIN else 'HARD MIN'} barrier (softmin disabled - unstable)")
 print("=" * 100 + "\n")
 
 # BOM: No "last good state" safety net - let barrier violations crash loudly
@@ -99,6 +99,33 @@ for epoch in range(1, EPOCHS + 1):
     
     needs_recal = epoch in RECALIBRATION_EPOCHS or epoch == 1
     if needs_recal:
+        # Tighten constraints at epoch 15
+        if epoch == 15:
+            print(f"\n🔧 Epoch {epoch}: TIGHTENING CONSTRAINTS...")
+            # Tighten KL bounds
+            GOAL_SPECS['kl_core']['lower'] = 100
+            GOAL_SPECS['kl_core']['upper'] = 3000
+            GOAL_SPECS['kl_core']['healthy'] = 1000
+            GOAL_SPECS['kl_detail']['lower'] = 100
+            GOAL_SPECS['kl_detail']['upper'] = 3000
+            GOAL_SPECS['kl_detail']['healthy'] = 1000
+            # Tighten detail contracts
+            GOAL_SPECS['detail_mean']['lower'] = -3.0
+            GOAL_SPECS['detail_mean']['upper'] = 3.0
+            GOAL_SPECS['detail_var_mean']['lower'] = 0.1
+            GOAL_SPECS['detail_var_mean']['upper'] = 15.0
+            # Tighten health constraints
+            GOAL_SPECS['detail_ratio']['lower'] = 0.05
+            GOAL_SPECS['detail_ratio']['upper'] = 0.50
+            GOAL_SPECS['core_var_health']['lower'] = 0.1
+            GOAL_SPECS['detail_var_health']['lower'] = 0.1
+            print(f"    KL: [100, 3000] healthy=1000")
+            print(f"    detail_mean: [-3, 3]")
+            print(f"    detail_var_mean: [0.1, 15]")
+            print(f"    detail_ratio: [0.05, 0.50]")
+            # Reinitialize goal system with tightened specs
+            goal_system = GoalSystem(GOAL_SPECS)
+
         goal_system.start_recalibration()
         print(f"\n📊 Epoch {epoch}: Calibrating...")
 
@@ -197,11 +224,12 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['mse'].append(result['mse'])
             epoch_data['edge'].append(result['edge_loss'])
 
-            # v14: Updated raw values
+            # v15: Updated raw values including leak detection
             for k in ['kl_core_raw', 'kl_detail_raw', 'detail_ratio_raw', 'core_var_raw', 'detail_var_raw',
                      'core_var_max_raw', 'detail_var_max_raw', 'consistency_raw',
                      'detail_mean_raw', 'detail_var_mean_raw', 'detail_cov_raw',
-                     'realism_recon_raw', 'realism_swap_raw']:
+                     'realism_recon_raw', 'realism_swap_raw',
+                     'core_color_leak_raw', 'detail_edge_leak_raw']:
                 epoch_data[k].append(rv.get(k, 0))
             epoch_data['structure_loss'].append(rv['structure_loss'])
             epoch_data['appearance_loss'].append(rv['appearance_loss'])
@@ -220,6 +248,8 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['swap_color_hist'].append(ig['swap_color_hist'])
             epoch_data['realism_recon'].append(ig['realism_recon'])
             epoch_data['realism_swap'].append(ig['realism_swap'])
+            epoch_data['core_color_leak'].append(ig['core_color_leak'])
+            epoch_data['detail_edge_leak'].append(ig['detail_edge_leak'])
             epoch_data['kl_core_goal'].append(ig['kl_core'])
             epoch_data['kl_detail_goal'].append(ig['kl_detail'])
             epoch_data['cov_goal'].append(ig['cov'])
@@ -272,10 +302,16 @@ for epoch in range(1, EPOCHS + 1):
     appear = histories['appearance_loss'][-1]
     kl_c = histories['kl_core_raw'][-1]
     kl_d = histories['kl_detail_raw'][-1]
+
+    # Calculate bottleneck percentages
+    total_batches = sum(bn_counts.values())
+    bn_pcts = {n: (bn_counts.get(n, 0) / total_batches * 100) if total_batches > 0 else 0 for n in GROUP_NAMES}
+
     print(f"\nEpoch {epoch:2d} | Loss: {histories['loss'][-1]:.3f} | Min: {histories['min_group'][-1]:.3f} | SSIM: {histories['ssim'][-1]:.3f}")
     print(f"         Structure: {struct:.4f} | Appearance: {appear:.4f}")
     print(f"         KL_core: {kl_c:.1f} | KL_detail: {kl_d:.1f}")
     print(f"         Groups: " + " | ".join(f"{n}:{histories[f'group_{n}'][-1]:.2f}" for n in GROUP_NAMES))
+    print(f"         Bottlenecks: " + " | ".join(f"{n}:{bn_pcts[n]:.1f}%" for n in GROUP_NAMES))
 
 # SAVE
 torch.save({

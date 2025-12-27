@@ -30,6 +30,13 @@ train_loader, data_info = load_from_config()
 model = create_model(LATENT_DIM, IMAGE_CHANNELS, DEVICE)
 discriminator = create_discriminator(IMAGE_CHANNELS, DEVICE)
 
+# A100: Compile models for significant speedup (PyTorch 2.0+)
+if USE_TORCH_COMPILE and hasattr(torch, 'compile'):
+    print("Compiling models with torch.compile (PyTorch 2.0+)...")
+    model = torch.compile(model, mode='reduce-overhead')  # 'reduce-overhead' best for training
+    discriminator = torch.compile(discriminator, mode='reduce-overhead')
+    print("Models compiled!")
+
 optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 optimizer_d = optim.AdamW(discriminator.parameters(), lr=LEARNING_RATE_D, weight_decay=WEIGHT_DECAY)
 

@@ -95,8 +95,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     logvar_core, logvar_detail = logvar[:, :split_idx], logvar[:, split_idx:]
 
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
-    recon_core = torch.clamp(model.decode(z_core_only), 0, 1)
-    recon = torch.clamp(recon, 0, 1)
+    recon_core = model.decode(z_core_only)  # No clamp - decoder sigmoid handles mapping
 
     with torch.no_grad():
         x_feat = vgg(x)
@@ -121,7 +120,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
         z1_core, z2_detail = z_core, z_detail[perm]
 
         z_sw = torch.cat([z1_core, z2_detail], dim=1)
-        r_sw = torch.clamp(model.decode(z_sw), 0, 1)
+        r_sw = model.decode(z_sw)  # No clamp - decoder sigmoid handles mapping
 
         losses['swap_structure'] = F.mse_loss(edges(r_sw), edges(x1)).item()
         losses['swap_appearance'] = F.mse_loss(mean_color(r_sw), mean_color(x2)).item()
@@ -144,18 +143,17 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
         losses['realism_recon'] = 0.5
         losses['realism_swap'] = 0.5
 
-    # v14: KL for BOTH core and detail
-    kl_per_dim_core = torch.clamp(-0.5 * (1 + logvar_core - mu_core.pow(2) - logvar_core.exp()), 0, 50)
+    # v14: KL for BOTH core and detail - no clamps, let BOX constraints enforce bounds
+    kl_per_dim_core = -0.5 * (1 + logvar_core - mu_core.pow(2) - logvar_core.exp())
     losses['kl_core'] = kl_per_dim_core.sum(dim=1).mean().item()
 
-    kl_per_dim_detail = torch.clamp(-0.5 * (1 + logvar_detail - mu_detail.pow(2) - logvar_detail.exp()), 0, 50)
+    kl_per_dim_detail = -0.5 * (1 + logvar_detail - mu_detail.pow(2) - logvar_detail.exp())
     losses['kl_detail'] = kl_per_dim_detail.sum(dim=1).mean().item()
 
-    z_c = torch.clamp(z_core, -10, 10)
-    z_c = z_c - z_c.mean(0, keepdim=True)
+    z_c = z_core - z_core.mean(0, keepdim=True)  # No clamp on z
     cov = (z_c.T @ z_c) / (B - 1 + 1e-8)
     diag = torch.diag(cov) + 1e-8
-    losses['cov'] = torch.clamp((cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum(), 0, 50).item()
+    losses['cov'] = ((cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum()).item()  # No clamp on cov
     losses['weak'] = (mu_core.var(0) < 0.1).float().mean().item()
 
     if x_aug is not None:
@@ -171,11 +169,10 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     losses['detail_var_mean'] = mu_detail.var(0).mean().item()     # Variance across batch, mean over dims
 
     # Detail covariance (same as core cov calculation)
-    z_d = torch.clamp(z_detail, -10, 10)
-    z_d = z_d - z_d.mean(0, keepdim=True)
+    z_d = z_detail - z_detail.mean(0, keepdim=True)  # No clamp on z
     cov_d = (z_d.T @ z_d) / (B - 1 + 1e-8)
     diag_d = torch.diag(cov_d) + 1e-8
-    losses['detail_cov'] = torch.clamp((cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum(), 0, 50).item()
+    losses['detail_cov'] = ((cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum()).item()  # No clamp on cov
 
     detail_contrib = (recon - recon_core).abs().mean()
     losses['detail_ratio'] = (detail_contrib / (recon_core.abs().mean() + 1e-8)).item()
@@ -198,10 +195,8 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     logvar_core, logvar_detail = logvar[:, :split_idx], logvar[:, split_idx:]
 
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
-    recon_core = model.decode(z_core_only)
+    recon_core = model.decode(z_core_only)  # No clamp - decoder sigmoid handles mapping
     if not check_tensor(recon_core): return None
-    recon = torch.clamp(recon, 0, 1)
-    recon_core = torch.clamp(recon_core, 0, 1)
 
     with torch.no_grad():
         x_feat = vgg(x)
@@ -229,7 +224,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         z1_core, z2_detail = z_core, z_detail[perm]
 
         z_sw = torch.cat([z1_core, z2_detail], dim=1)
-        r_sw = torch.clamp(model.decode(z_sw), 0, 1)
+        r_sw = model.decode(z_sw)  # No clamp - decoder sigmoid handles mapping
 
         structure_loss = F.mse_loss(edges(r_sw), edges(x1))
         g_swap_structure = goals.goal(structure_loss, 'swap_structure')
@@ -262,19 +257,19 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         g_realism_swap = torch.tensor(0.5, device=x.device)
         realism_loss_recon = realism_loss_swap = torch.tensor(0.0, device=x.device)
 
-    # GROUP E: LATENT QUALITY (v14 - KL for BOTH core and detail)
-    kl_per_dim_core = torch.clamp(-0.5 * (1 + logvar_core - mu_core.pow(2) - logvar_core.exp()), 0, 50)
+    # GROUP E: LATENT QUALITY (v14 - KL for BOTH core and detail) - no clamps
+    kl_per_dim_core = -0.5 * (1 + logvar_core - mu_core.pow(2) - logvar_core.exp())
     kl_core_val = kl_per_dim_core.sum(dim=1).mean()
     g_kl_core = goals.goal(kl_core_val, 'kl_core')
 
-    kl_per_dim_detail = torch.clamp(-0.5 * (1 + logvar_detail - mu_detail.pow(2) - logvar_detail.exp()), 0, 50)
+    kl_per_dim_detail = -0.5 * (1 + logvar_detail - mu_detail.pow(2) - logvar_detail.exp())
     kl_detail_val = kl_per_dim_detail.sum(dim=1).mean()
     g_kl_detail = goals.goal(kl_detail_val, 'kl_detail')
     
-    z_c = torch.clamp(z_core, -10, 10) - torch.clamp(z_core, -10, 10).mean(0, keepdim=True)
+    z_c = z_core - z_core.mean(0, keepdim=True)  # No clamp on z
     cov = (z_c.T @ z_c) / (B - 1 + 1e-8)
     diag = torch.diag(cov) + 1e-8
-    cov_penalty = torch.clamp((cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum(), 0, 50)
+    cov_penalty = (cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum()  # No clamp on cov
     g_cov = goals.goal(cov_penalty, 'cov')
     g_weak = goals.goal((mu_core.var(0) < 0.1).float().mean(), 'weak')
 
@@ -294,10 +289,10 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     detail_var_mean_val = mu_detail.var(0).mean()
     g_detail_var_mean = goals.goal(detail_var_mean_val, 'detail_var_mean')
 
-    z_d = torch.clamp(z_detail, -10, 10) - torch.clamp(z_detail, -10, 10).mean(0, keepdim=True)
+    z_d = z_detail - z_detail.mean(0, keepdim=True)  # No clamp on z
     cov_d = (z_d.T @ z_d) / (B - 1 + 1e-8)
     diag_d = torch.diag(cov_d) + 1e-8
-    detail_cov_penalty = torch.clamp((cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum(), 0, 50)
+    detail_cov_penalty = (cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum()  # No clamp on cov
     g_detail_cov = goals.goal(detail_cov_penalty, 'detail_cov')
 
     # GROUP F: HEALTH

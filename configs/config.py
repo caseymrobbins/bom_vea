@@ -36,7 +36,7 @@ NUM_TRAVERSE_DIMS = 15
 USE_AUGMENTATION = True
 
 # A/B Testing: Softmin vs Hard Min
-USE_SOFTMIN = True  # True = softmin, False = hard min
+USE_SOFTMIN = False  # True = softmin, False = hard min (SOFTMIN UNSTABLE - using hard min)
 SOFTMIN_TEMPERATURE = 0.1  # Lower = closer to hard min, higher = smoother
 
 from enum import Enum
@@ -64,9 +64,9 @@ GOAL_SPECS = {
     'swap_appearance': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # colors(r_sw) ≈ colors(x2)
     'swap_color_hist': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # histogram(r_sw) ≈ histogram(x2)
 
-    # v14: Realism group - discriminator goals (TIGHTENED)
-    'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 2.0},  # D should classify recon as real
-    'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 2.0},   # D should classify swap as real
+    # v14: Realism group - discriminator goals
+    'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # D should classify recon as real
+    'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},   # D should classify swap as real
 
     # Latent group - BOTH core and detail now have KL! (TIGHTENED ranges)
     'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100, 'upper': 5000, 'healthy': 1500},
@@ -75,15 +75,15 @@ GOAL_SPECS = {
     'weak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.1},
     'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
-    # v14: Detail contracts - ensure detail channel has proper statistics (TIGHTENED)
-    'detail_mean': {'type': ConstraintType.BOX, 'lower': -1.5, 'upper': 1.5},    # Mean should be near 0
-    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.3, 'upper': 5.0}, # Variance should be reasonable
-    'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 2.0},       # Low covariance (stronger penalty)
+    # v14: Detail contracts - feasible initialization
+    'detail_mean': {'type': ConstraintType.BOX, 'lower': -5.0, 'upper': 5.0},    # Mean should be near 0
+    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 20.0}, # Variance should be reasonable
+    'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 1.0},       # Low covariance
 
-    # Health group (TIGHTENED ranges)
-    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.15, 'upper': 0.40},
-    'core_var_health': {'type': ConstraintType.BOX, 'lower': 1.0, 'upper': 30.0},
-    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 1.0, 'upper': 30.0},
+    # Health group (feasible initialization)
+    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.05, 'upper': 0.60},
+    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 50.0},
+    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.1, 'upper': 50.0},
     'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
 }

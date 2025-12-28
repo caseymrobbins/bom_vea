@@ -1,6 +1,5 @@
 # losses/bom_loss.py
-# v15: Tightened constraints + Softmin A/B test
-# Based on v14: Discriminator + Detail contracts
+# v14: Discriminator + Detail contracts + meaningful traversal goals
 # r_sw should have: x1's STRUCTURE + x2's APPEARANCE
 
 import torch
@@ -88,7 +87,7 @@ def check_tensor(t):
     return not (torch.isnan(t).any() or torch.isinf(t).any())
 
 def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discriminator=None, x_aug=None):
-    """Compute all raw losses for calibration. v15: Includes discriminator and detail contracts from v14."""
+    """Compute all raw losses for calibration. v14: Discriminator + detail contracts + traversal meaning."""
     B = x.shape[0]
     z_core, z_detail = z[:, :split_idx], z[:, split_idx:]
     mu_core, mu_detail = mu[:, :split_idx], mu[:, split_idx:]
@@ -180,7 +179,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     diag_d = torch.diag(cov_d) + 1e-8
     losses['detail_cov'] = ((cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum()).item()  # No clamp on cov
 
-    # v15: Disentanglement - behavioral leak detection via intervention testing
+    # v14: Behavioral checks + traversal meaning (intervention testing)
     with torch.no_grad():
         noise_scale = 0.5
         # Core-only perturbation
@@ -192,8 +191,20 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
         z_pert_detail = torch.cat([z_core, z_detail_pert], dim=1)
         recon_pert_detail = model.decode(z_pert_detail)
 
-    losses['core_color_leak'] = F.mse_loss(mean_color(recon_pert_core), mean_color(recon)).item()
-    losses['detail_edge_leak'] = F.mse_loss(edges(recon_pert_detail), edges(recon)).item()
+    core_color_leak = F.mse_loss(mean_color(recon_pert_core), mean_color(recon))
+    detail_edge_leak = F.mse_loss(edges(recon_pert_detail), edges(recon))
+    losses['core_color_leak'] = core_color_leak.item()
+    losses['detail_edge_leak'] = detail_edge_leak.item()
+
+    core_edge_shift = F.mse_loss(edges(recon_pert_core), edges(recon))
+    detail_color_shift = F.mse_loss(mean_color(recon_pert_detail), mean_color(recon))
+    traversal_loss = 0.5 * (
+        1.0 / (core_edge_shift + 1e-4) +
+        1.0 / (detail_color_shift + 1e-4)
+    )
+    losses['traversal'] = traversal_loss.item()
+    losses['traversal_core_effect'] = core_edge_shift.item()
+    losses['traversal_detail_effect'] = detail_color_shift.item()
 
     detail_contrib = (recon - recon_core).abs().mean()
     losses['detail_ratio'] = (detail_contrib / (recon_core.abs().mean() + 1e-8)).item()
@@ -206,7 +217,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     return losses
 
 def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None, use_softmin=False, softmin_temperature=0.1):
-    """Compute BOM loss with grouped goals. v15: Adds softmin option, includes v14 discriminator + detail contracts."""
+    """Compute BOM loss with grouped goals. v14: Discriminator + detail contracts + traversal meaning."""
     if not all([check_tensor(t) for t in [recon, x, mu, logvar, z]]):
         return None
 
@@ -287,19 +298,19 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     # Test: What happens when we perturb ONLY core or ONLY detail?
     # Wall 1: Perturbing core should NOT change colors (core doesn't leak into appearance)
     # Wall 2: Perturbing detail should NOT change edges (detail doesn't leak into structure)
-    with torch.no_grad():
-        # Controlled perturbation magnitude (0.5 std units)
-        noise_scale = 0.5
+    # Traversal meaning: perturbations should change their intended targets.
+    # Controlled perturbation magnitude (0.5 std units)
+    noise_scale = 0.5
 
-        # Core-only perturbation: change structure channel, keep appearance channel same
-        z_core_pert = z_core + torch.randn_like(z_core) * noise_scale
-        z_pert_core = torch.cat([z_core_pert, z_detail], dim=1)
-        recon_pert_core = model.decode(z_pert_core)
+    # Core-only perturbation: change structure channel, keep appearance channel same
+    z_core_pert = z_core + torch.randn_like(z_core) * noise_scale
+    z_pert_core = torch.cat([z_core_pert, z_detail], dim=1)
+    recon_pert_core = model.decode(z_pert_core)
 
-        # Detail-only perturbation: change appearance channel, keep structure channel same
-        z_detail_pert = z_detail + torch.randn_like(z_detail) * noise_scale
-        z_pert_detail = torch.cat([z_core, z_detail_pert], dim=1)
-        recon_pert_detail = model.decode(z_pert_detail)
+    # Detail-only perturbation: change appearance channel, keep structure channel same
+    z_detail_pert = z_detail + torch.randn_like(z_detail) * noise_scale
+    z_pert_detail = torch.cat([z_core, z_detail_pert], dim=1)
+    recon_pert_detail = model.decode(z_pert_detail)
 
     # Measure leaks (should be SMALL)
     core_color_leak = F.mse_loss(mean_color(recon_pert_core), mean_color(recon))
@@ -307,6 +318,14 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     g_core_color_leak = goals.goal(core_color_leak, 'core_color_leak')
     g_detail_edge_leak = goals.goal(detail_edge_leak, 'detail_edge_leak')
+
+    core_edge_shift = F.mse_loss(edges(recon_pert_core), edges(recon))
+    detail_color_shift = F.mse_loss(mean_color(recon_pert_detail), mean_color(recon))
+    traversal_loss = 0.5 * (
+        1.0 / (core_edge_shift + 1e-4) +
+        1.0 / (detail_color_shift + 1e-4)
+    )
+    g_traversal = goals.goal(traversal_loss, 'traversal')
 
     # GROUP F: LATENT QUALITY (v14 - KL for BOTH core and detail) - no clamps
     logvar_core_safe = torch.clamp(logvar_core, min=-30.0, max=20.0)
@@ -367,7 +386,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     g_core_var_max = goals.goal(core_var_max, 'core_var_max')
     g_detail_var_max = goals.goal(detail_var_max, 'detail_var_max')
 
-    # GROUPED BOM - v15: Added disentanglement group (behavioral walls)
+    # GROUPED BOM - behavioral walls + traversal meaning
     group_recon = geometric_mean([g_pixel, g_edge, g_perceptual])
     group_core = geometric_mean([g_core_mse, g_core_edge])
     group_swap = geometric_mean([g_swap_structure, g_swap_appearance, g_swap_color_hist])
@@ -377,7 +396,11 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     # Disentangle: Add epsilon to prevent crash when leak=0 at init (collapsed encoder)
     group_disentangle = geometric_mean([torch.clamp(g_core_color_leak, min=1e-8),
                                         torch.clamp(g_detail_edge_leak, min=1e-8)])
-    group_latent = geometric_mean([g_kl_core, g_kl_detail, g_logvar_core, g_logvar_detail, g_cov, g_weak, g_consistency, g_detail_mean, g_detail_var_mean, g_detail_cov])
+    group_latent = geometric_mean([
+        g_kl_core, g_kl_detail, g_logvar_core, g_logvar_detail,
+        g_cov, g_weak, g_consistency, g_detail_mean, g_detail_var_mean,
+        g_detail_cov, g_traversal,
+    ])
     group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var, g_core_var_max, g_detail_var_max])
 
     groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_disentangle, group_latent, group_health])
@@ -404,6 +427,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'realism_recon': g_realism_recon.item() if isinstance(g_realism_recon, torch.Tensor) else g_realism_recon,
         'realism_swap': g_realism_swap.item() if isinstance(g_realism_swap, torch.Tensor) else g_realism_swap,
         'core_color_leak': g_core_color_leak.item(), 'detail_edge_leak': g_detail_edge_leak.item(),
+        'traversal': g_traversal.item(),
         'kl_core': g_kl_core.item(), 'kl_detail': g_kl_detail.item(),
         'logvar_core': g_logvar_core.item(), 'logvar_detail': g_logvar_detail.item(),
         'cov': g_cov.item(), 'weak': g_weak.item(),
@@ -429,6 +453,9 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'realism_recon_raw': realism_loss_recon.item() if isinstance(realism_loss_recon, torch.Tensor) else realism_loss_recon,
         'realism_swap_raw': realism_loss_swap.item() if isinstance(realism_loss_swap, torch.Tensor) else realism_loss_swap,
         'core_color_leak_raw': core_color_leak.item(), 'detail_edge_leak_raw': detail_edge_leak.item(),
+        'traversal_raw': traversal_loss.item(),
+        'traversal_core_effect_raw': core_edge_shift.item(),
+        'traversal_detail_effect_raw': detail_color_shift.item(),
         'detail_mean_raw': detail_mean_val.item(), 'detail_var_mean_raw': detail_var_mean_val.item(),
         'detail_cov_raw': detail_cov_penalty.item(),
     }

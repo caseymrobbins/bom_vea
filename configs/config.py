@@ -1,5 +1,5 @@
 # configs/config.py
-# v15: Progressive group-by-group tightening (one group every 3 epochs)
+# v14: Discriminator + Detail contracts + traversal meaning goal
 
 import torch
 
@@ -32,7 +32,7 @@ DATA_PATH = '/content/celeba'
 ZIP_PATH = '/content/img_align_celeba.zip'
 
 # Output
-OUTPUT_DIR = '/content/outputs_bom_v15'
+OUTPUT_DIR = '/content/outputs_bom_v14'
 EVAL_SAMPLES = 10000
 NUM_TRAVERSE_DIMS = 15
 
@@ -71,7 +71,7 @@ GOAL_SPECS = {
     'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # D should classify recon as real
     'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},   # D should classify swap as real
 
-    # NEW: Disentanglement group - behavioral walls (what core/detail actually DO)
+    # Behavioral walls (what core/detail actually DO)
     'core_color_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # Δz_core shouldn't change colors
     'detail_edge_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # Δz_detail shouldn't change edges
 
@@ -95,6 +95,7 @@ GOAL_SPECS = {
     'detail_mean': {'type': ConstraintType.BOX, 'lower': -15.0, 'upper': 15.0},
     'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 350.0},  # Allow 0.0 at init
     'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 1.0},
+    'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # Health group - WIDE initial bounds, tighten at epoch 27
     'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 0.70},  # Allow exactly 0.0 at init

@@ -82,7 +82,12 @@ class GoalSystem:
                     min_val = np.min(self.samples[name])
                     max_val = np.max(self.samples[name])
                     mean_val = np.mean(self.samples[name])
-                    self.scales[name] = max(median, 1e-6)
+                    # Use max if median is near zero (prevents over-sensitivity)
+                    # Minimum scale 0.001 to prevent goals from collapsing to zero
+                    if median < 1e-4:
+                        self.scales[name] = max(max_val, 0.001)
+                    else:
+                        self.scales[name] = max(median, 0.001)
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
                     print(f"  {name:20s}: scale={self.scales[name]:.4f} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
                 else:

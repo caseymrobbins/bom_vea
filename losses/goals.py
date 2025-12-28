@@ -160,6 +160,8 @@ class GoalSystem:
     def start_recalibration(self):
         self.samples = {name: [] for name in self.specs.keys()}
 
-def geometric_mean(goals):
+def geometric_mean(goals, eps=1e-8):
+    """Geometric mean with epsilon to prevent exact zeros causing -log(0) = inf"""
     goals = torch.stack(goals)
+    goals = torch.clamp(goals, min=eps)  # Prevent exact 0s
     return goals.prod() ** (1.0 / len(goals))

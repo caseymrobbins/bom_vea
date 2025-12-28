@@ -89,7 +89,7 @@ GOAL_SPECS = {
     'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 1.0},
 
     # Health group - WIDE initial bounds, tighten at epoch 27
-    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.001, 'upper': 0.70},
+    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 0.70},  # Allow exactly 0.0 at init
     'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.01, 'upper': 300.0},
     'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.01, 'upper': 300.0},
     'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},

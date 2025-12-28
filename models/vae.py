@@ -47,10 +47,10 @@ class ConvVAE(nn.Module):
         
         self.mu = nn.Linear(512 * 4 * 4, latent_dim)
         self.logvar = nn.Linear(512 * 4 * 4, latent_dim)
-        # ULTRA conservative init: logvar.bias=-5.0 → exp(-2.5)=0.08 std → KL≈0.003/dim → total≈0.4
-        # Start with near-deterministic encoder, let BOM gradually increase variance
-        # Previous -1.0 still caused KL to explode to 10^30+ due to untrained encoder features
-        nn.init.normal_(self.mu.weight, 0, 0.001); nn.init.zeros_(self.mu.bias)  # Smaller weight init too
+        # ULTRA conservative init: zero mu + logvar.bias=-5.0 → std≈0.08, KL≈2.0/dim at start
+        # Keep encoder outputs near zero to avoid massive KL spikes from untrained features.
+        nn.init.zeros_(self.mu.weight)
+        nn.init.zeros_(self.mu.bias)
         nn.init.zeros_(self.logvar.weight); nn.init.constant_(self.logvar.bias, -5.0)  # Zero weights = pure bias
         
         self.dec_lin = nn.Linear(latent_dim, 512 * 4 * 4)

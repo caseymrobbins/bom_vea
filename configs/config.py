@@ -11,7 +11,7 @@ if torch.cuda.is_available():
     torch.set_float32_matmul_precision('high')
 
 # A100 Optimizations
-USE_TORCH_COMPILE = True  # PyTorch 2.0+: Significant speedup on A100 (set False if PyTorch < 2.0)
+USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during backward pass
 
 # Training
 EPOCHS = 30
@@ -85,7 +85,7 @@ GOAL_SPECS = {
 
     # v14: Detail contracts - WIDE initial bounds for feasible initialization
     'detail_mean': {'type': ConstraintType.BOX, 'lower': -15.0, 'upper': 15.0},
-    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.01, 'upper': 300.0},
+    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.01, 'upper': 350.0},  # Widened: was 300, init goes to 311
     'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 1.0},
 
     # Health group - WIDE initial bounds, tighten at epoch 27

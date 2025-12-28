@@ -79,9 +79,12 @@ class GoalSystem:
             if ctype == ConstraintType.MINIMIZE_SOFT and spec.get('scale') == 'auto':
                 if self.samples.get(name):
                     median = np.median(self.samples[name])
+                    min_val = np.min(self.samples[name])
+                    max_val = np.max(self.samples[name])
+                    mean_val = np.mean(self.samples[name])
                     self.scales[name] = max(median, 1e-6)
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
-                    print(f"  {name:20s}: scale={self.scales[name]:.4f}")
+                    print(f"  {name:20s}: scale={self.scales[name]:.4f} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
                 else:
                     self.scales[name] = 1.0
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=1.0)
@@ -89,7 +92,14 @@ class GoalSystem:
             elif ctype == ConstraintType.MINIMIZE_SOFT:
                 self.scales[name] = spec['scale']
                 self.normalizers[name] = make_normalizer_torch(ctype, scale=spec['scale'])
-                print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed)")
+                if self.samples.get(name):
+                    min_val = np.min(self.samples[name])
+                    max_val = np.max(self.samples[name])
+                    mean_val = np.mean(self.samples[name])
+                    median = np.median(self.samples[name])
+                    print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed) | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
+                else:
+                    print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed)")
             elif ctype == ConstraintType.BOX:
                 self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'])
                 if self.samples.get(name):
@@ -112,6 +122,17 @@ class GoalSystem:
                         box_violations.append(f"{name}: init range [{min_val:.0f}, {max_val:.0f}] outside BOX [{spec['lower']:.0f}, {spec['upper']:.0f}]")
                 else:
                     print(f"  {name:20s}: BOX_ASYM [{spec['lower']:.0f}, {spec['upper']:.0f}] h={spec['healthy']:.0f} (no samples)")
+            elif ctype == ConstraintType.LOWER:
+                self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
+                if self.samples.get(name):
+                    margin = spec['margin']
+                    min_val = np.min(self.samples[name])
+                    max_val = np.max(self.samples[name])
+                    mean_val = np.mean(self.samples[name])
+                    median = np.median(self.samples[name])
+                    print(f"  {name:20s}: LOWER(margin={margin:.0f}) | raw: [{min_val:.0f}, {max_val:.0f}] mean={mean_val:.0f} median={median:.0f}")
+                else:
+                    print(f"  {name:20s}: LOWER(margin={spec['margin']:.0f}) (no samples)")
             else:
                 self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
 

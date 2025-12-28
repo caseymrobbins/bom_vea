@@ -1,5 +1,4 @@
-# train.py - v15: Tightened constraints + Softmin A/B test
-# Based on v14: Discriminator + Detail contracts
+# train.py - v13: EXPLICIT structure/appearance separation
 # Core = STRUCTURE (edges, geometry)
 # Detail = APPEARANCE (colors, lighting)
 import os, sys, time, copy
@@ -14,7 +13,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from configs.config import *
 from utils.data import load_from_config
 from models.vae import create_model
-from models.discriminator import create_discriminator
 from models.vgg import VGGFeatures
 from losses.goals import GoalSystem
 from losses.bom_loss import compute_raw_losses, grouped_bom_loss, check_tensor
@@ -27,13 +25,8 @@ if DEVICE == 'cuda': print(f"GPU: {torch.cuda.get_device_name(0)}")
 
 train_loader, data_info = load_from_config()
 model = create_model(LATENT_DIM, IMAGE_CHANNELS, DEVICE)
-discriminator = create_discriminator(IMAGE_CHANNELS, DEVICE)
-
 optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-optimizer_d = optim.AdamW(discriminator.parameters(), lr=LEARNING_RATE_D, weight_decay=WEIGHT_DECAY)
-
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-5)
-scheduler_d = optim.lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=EPOCHS, eta_min=1e-5)
 
 vgg = VGGFeatures(DEVICE)
 goal_system = GoalSystem(GOAL_SPECS)
@@ -52,20 +45,14 @@ def apply_augmentation(x):
 
 histories = {
     'loss': [], 'min_group': [], 'bottleneck': [], 'ssim': [], 'mse': [], 'edge': [],
-    'kl_core_raw': [], 'kl_detail_raw': [],
-    'detail_ratio_raw': [], 'core_var_raw': [], 'detail_var_raw': [],
+    'kl_raw': [], 'detail_ratio_raw': [], 'core_var_raw': [], 'detail_var_raw': [],
     'core_var_max_raw': [], 'detail_var_max_raw': [], 'consistency_raw': [],
     'structure_loss': [], 'appearance_loss': [], 'color_hist_loss': [],
-    'realism_recon_raw': [], 'realism_swap_raw': [],
-    'detail_mean_raw': [], 'detail_var_mean_raw': [], 'detail_cov_raw': [],
     **{f'group_{n}': [] for n in GROUP_NAMES},
     'pixel': [], 'edge_goal': [], 'perceptual': [],
     'core_mse': [], 'core_edge': [],
     'swap_structure': [], 'swap_appearance': [], 'swap_color_hist': [],
-    'realism_recon': [], 'realism_swap': [],
-    'kl_core_goal': [], 'kl_detail_goal': [],
-    'cov_goal': [], 'weak': [], 'consistency_goal': [],
-    'detail_mean_goal': [], 'detail_var_mean_goal': [], 'detail_cov_goal': [],
+    'kl_goal': [], 'cov_goal': [], 'weak': [], 'consistency_goal': [],
     'detail_ratio_goal': [], 'core_var_goal': [], 'detail_var_goal': [],
     'core_var_max_goal': [], 'detail_var_max_goal': [],
     'core_active': [], 'detail_active': [], 'core_effective': [], 'detail_effective': [],
@@ -73,22 +60,15 @@ histories = {
 dim_variance_history = {'core': [], 'detail': []}
 
 print("\n" + "=" * 100)
-print(f"BOM VAE v15 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
-print("v15: Tightened constraints + Softmin A/B test")
-print("     - Based on v14: Discriminator + Detail contracts")
-print("     - PatchGAN discriminator with spectral norm")
-print("     - KL divergence for BOTH core and detail channels")
-print("     - Detail contracts: mean, variance, covariance")
-print(f"\nA/B TEST: {'SOFTMIN' if USE_SOFTMIN else 'HARD MIN'} barrier")
-if USE_SOFTMIN:
-    print(f"          Temperature = {SOFTMIN_TEMPERATURE} (lower = sharper, higher = smoother)")
+print(f"BOM VAE v13 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
+print("v13: EXPLICIT structure/appearance separation")
+print("     Core = STRUCTURE (edges match x1)")
+print("     Detail = APPEARANCE (colors match x2)")
 print("=" * 100 + "\n")
 
-# BOM: No "last good state" safety net - let barrier violations crash loudly
-# last_good_state = copy.deepcopy(model.state_dict())
-# last_good_state_d = copy.deepcopy(discriminator.state_dict())
-# last_good_optimizer = copy.deepcopy(optimizer.state_dict())
-# last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
+last_good_state = copy.deepcopy(model.state_dict())
+last_good_optimizer = copy.deepcopy(optimizer.state_dict())
+nan_count = 0
 
 for epoch in range(1, EPOCHS + 1):
     t0 = time.time()
@@ -115,29 +95,9 @@ for epoch in range(1, EPOCHS + 1):
         optimizer.zero_grad(set_to_none=True)
         recon, mu, logvar, z = model(x)
         
-        # v14: Train discriminator first
-        if goal_system.calibrated and batch_idx % 2 == 0:  # Train D every other step
-            discriminator.train()
-            optimizer_d.zero_grad(set_to_none=True)
-
-            # Real images should get score 1
-            d_real = discriminator(x)
-            loss_d_real = F.binary_cross_entropy_with_logits(d_real, torch.ones_like(d_real))
-
-            # Fake images (recon) should get score 0
-            with torch.no_grad():
-                recon_for_d = model(x)[0].detach()
-            d_fake = discriminator(recon_for_d)
-            loss_d_fake = F.binary_cross_entropy_with_logits(d_fake, torch.zeros_like(d_fake))
-
-            loss_d = (loss_d_real + loss_d_fake) / 2
-            loss_d.backward()
-            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
-            optimizer_d.step()
-
         if needs_recal and batch_idx < CALIBRATION_BATCHES:
             with torch.no_grad():
-                raw = compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discriminator, x_aug)
+                raw = compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, x_aug)
                 goal_system.collect(raw)
             if not goal_system.calibrated:
                 F.mse_loss(recon, x).backward()
@@ -145,33 +105,30 @@ for epoch in range(1, EPOCHS + 1):
                 optimizer.step()
                 pbar.set_postfix({'phase': 'CALIBRATING'})
                 continue
-
+        
         if needs_recal and batch_idx == CALIBRATION_BATCHES:
             goal_system.calibrate(epoch=epoch)
             needs_recal = False
-
-        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug, USE_SOFTMIN, SOFTMIN_TEMPERATURE)
-
-        # BOM philosophy: Let it crash loudly if constraints violated, don't mask with reloads
+        
+        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, x_aug)
+        
         if result is None:
-            print(f"ERROR: Loss computation failed (returned None) at epoch {epoch}, batch {batch_idx}")
-            print(f"This means a barrier was violated or NaN/Inf detected.")
-            print(f"Fix: Adjust initialization or widen BOX constraints, don't mask the crash.")
-            raise RuntimeError("BOM barrier violation - loss returned None")
-
+            skip_count += 1
+            if skip_count > 10:
+                print("Warning: Stability issue. Reloading last good state.")
+                model.load_state_dict(last_good_state)
+                optimizer.load_state_dict(last_good_optimizer)
+                nan_count += 1; skip_count = 0
+                if nan_count > 5: break
+            continue
+        
         loss = result['loss']
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"ERROR: Loss is NaN/Inf at epoch {epoch}, batch {batch_idx}")
-            print(f"loss value: {loss.item()}")
-            raise RuntimeError("BOM barrier violation - loss is NaN/Inf")
-
         loss.backward()
-
-        # BOM philosophy: No grad clipping - if gradients explode, the barrier is wrong
-        # if any(p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()) for p in model.parameters()):
-        #     skip_count += 1; optimizer.zero_grad(set_to_none=True); continue
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
+        
+        if any(p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()) for p in model.parameters()):
+            skip_count += 1; optimizer.zero_grad(set_to_none=True); continue
+        
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         
         if batch_idx % 10 == 0:
@@ -179,12 +136,10 @@ for epoch in range(1, EPOCHS + 1):
                 all_mu_core.append(mu[:, :split_idx].cpu())
                 all_mu_detail.append(mu[:, split_idx:].cpu())
         
-        # BOM: No checkpointing "last good state" - let failures be visible
-        # if batch_idx % 200 == 0 and batch_idx > 0:
-        #     last_good_state = copy.deepcopy(model.state_dict())
-        #     last_good_state_d = copy.deepcopy(discriminator.state_dict())
-        #     last_good_optimizer = copy.deepcopy(optimizer.state_dict())
-        #     last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
+        if batch_idx % 200 == 0 and batch_idx > 0:
+            last_good_state = copy.deepcopy(model.state_dict())
+            last_good_optimizer = copy.deepcopy(optimizer.state_dict())
+            skip_count = 0
 
         with torch.no_grad():
             groups = result['groups']
@@ -196,12 +151,8 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['ssim'].append(result['ssim'])
             epoch_data['mse'].append(result['mse'])
             epoch_data['edge'].append(result['edge_loss'])
-
-            # v14: Updated raw values
-            for k in ['kl_core_raw', 'kl_detail_raw', 'detail_ratio_raw', 'core_var_raw', 'detail_var_raw',
-                     'core_var_max_raw', 'detail_var_max_raw', 'consistency_raw',
-                     'detail_mean_raw', 'detail_var_mean_raw', 'detail_cov_raw',
-                     'realism_recon_raw', 'realism_swap_raw']:
+            
+            for k in ['kl_raw', 'detail_ratio_raw', 'core_var_raw', 'detail_var_raw', 'core_var_max_raw', 'detail_var_max_raw', 'consistency_raw']:
                 epoch_data[k].append(rv.get(k, 0))
             epoch_data['structure_loss'].append(rv['structure_loss'])
             epoch_data['appearance_loss'].append(rv['appearance_loss'])
@@ -218,16 +169,10 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['swap_structure'].append(ig['swap_structure'])
             epoch_data['swap_appearance'].append(ig['swap_appearance'])
             epoch_data['swap_color_hist'].append(ig['swap_color_hist'])
-            epoch_data['realism_recon'].append(ig['realism_recon'])
-            epoch_data['realism_swap'].append(ig['realism_swap'])
-            epoch_data['kl_core_goal'].append(ig['kl_core'])
-            epoch_data['kl_detail_goal'].append(ig['kl_detail'])
+            epoch_data['kl_goal'].append(ig['kl'])
             epoch_data['cov_goal'].append(ig['cov'])
             epoch_data['weak'].append(ig['weak'])
             epoch_data['consistency_goal'].append(ig.get('consistency', 0.5))
-            epoch_data['detail_mean_goal'].append(ig['detail_mean'])
-            epoch_data['detail_var_mean_goal'].append(ig['detail_var_mean'])
-            epoch_data['detail_cov_goal'].append(ig['detail_cov'])
             epoch_data['detail_ratio_goal'].append(ig['detail_ratio'])
             epoch_data['core_var_goal'].append(ig['core_var'])
             epoch_data['detail_var_goal'].append(ig['detail_var'])
@@ -242,14 +187,10 @@ for epoch in range(1, EPOCHS + 1):
     if nan_count > 5: 
         print("Too many instability issues. Stopping.")
         break
-
-
+        
     scheduler.step()
-    scheduler_d.step()
     last_good_state = copy.deepcopy(model.state_dict())
-    last_good_state_d = copy.deepcopy(discriminator.state_dict())
     last_good_optimizer = copy.deepcopy(optimizer.state_dict())
-    last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
     
     if all_mu_core:
         mc, md = torch.cat(all_mu_core), torch.cat(all_mu_detail)
@@ -270,22 +211,13 @@ for epoch in range(1, EPOCHS + 1):
 
     struct = histories['structure_loss'][-1]
     appear = histories['appearance_loss'][-1]
-    kl_c = histories['kl_core_raw'][-1]
-    kl_d = histories['kl_detail_raw'][-1]
     print(f"\nEpoch {epoch:2d} | Loss: {histories['loss'][-1]:.3f} | Min: {histories['min_group'][-1]:.3f} | SSIM: {histories['ssim'][-1]:.3f}")
     print(f"         Structure: {struct:.4f} | Appearance: {appear:.4f}")
-    print(f"         KL_core: {kl_c:.1f} | KL_detail: {kl_d:.1f}")
     print(f"         Groups: " + " | ".join(f"{n}:{histories[f'group_{n}'][-1]:.2f}" for n in GROUP_NAMES))
 
 # SAVE
-torch.save({
-    'model': model.state_dict(),
-    'discriminator': discriminator.state_dict(),
-    'histories': histories,
-    'scales': goal_system.scales,
-    'dim_var': dim_variance_history
-}, f'{OUTPUT_DIR}/bom_vae_v15.pt')
-print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v15.pt")
+torch.save({'model': model.state_dict(), 'histories': histories, 'scales': goal_system.scales, 'dim_var': dim_variance_history}, f'{OUTPUT_DIR}/bom_vae_v13.pt')
+print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v13.pt")
 
 # EVAL
 print("\n" + "=" * 60 + "\nEVALUATION\n" + "=" * 60)
@@ -318,7 +250,7 @@ print(f"\n  MSE:   {mse_t/(cnt*3*64*64):.6f}\n  SSIM:  {np.mean(ss):.4f}\n  LPIP
 # VIZ
 print("\nGenerating visualizations...")
 samples, _ = next(iter(train_loader))
-plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v15 - {data_info['name']}")
+plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v13 - {data_info['name']}")
 plot_reconstructions(model, samples, split_idx, f'{OUTPUT_DIR}/reconstructions.png', DEVICE)
 plot_traversals(model, samples, split_idx, f'{OUTPUT_DIR}/traversals_core.png', f'{OUTPUT_DIR}/traversals_detail.png', NUM_TRAVERSE_DIMS, DEVICE)
 plot_cross_reconstruction(model, samples, split_idx, f'{OUTPUT_DIR}/cross_reconstruction.png', DEVICE)

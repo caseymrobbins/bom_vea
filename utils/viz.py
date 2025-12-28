@@ -1,4 +1,4 @@
-# utils/viz.py - v15 (based on v13 structure/appearance updates)
+# utils/viz.py - v13 updated for structure/appearance
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -86,8 +86,6 @@ def plot_training_history(histories, output_path):
     axs[1,0].plot(histories['core_var_raw'], label='core')
     axs[1,0].plot(histories['detail_var_raw'], label='detail')
     axs[1,0].set_title('Variance'); axs[1,0].legend(); axs[1,0].grid(True, alpha=0.3)
-    axs[1,1].plot(histories['kl_core_raw'], label='core')
-    axs[1,1].plot(histories['kl_detail_raw'], label='detail')
-    axs[1,1].set_title('KL'); axs[1,1].legend(); axs[1,1].grid(True, alpha=0.3)
+    axs[1,1].plot(histories['kl_raw']); axs[1,1].set_title('KL'); axs[1,1].grid(True, alpha=0.3)
     axs[1,2].plot(histories['min_group']); axs[1,2].set_title('Min Group'); axs[1,2].grid(True, alpha=0.3)
     plt.tight_layout(); plt.savefig(output_path, dpi=150); plt.close()

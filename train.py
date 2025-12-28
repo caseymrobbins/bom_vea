@@ -294,11 +294,6 @@ for epoch in range(1, EPOCHS + 1):
             'bn': GROUP_NAMES[result['min_idx'].item()], 'ssim': f"{result['ssim']:.3f}",
         })
 
-    if nan_count > 5: 
-        print("Too many instability issues. Stopping.")
-        break
-
-
     scheduler.step()
     scheduler_d.step()
     last_good_state = copy.deepcopy(model.state_dict())

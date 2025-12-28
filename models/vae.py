@@ -47,9 +47,11 @@ class ConvVAE(nn.Module):
         
         self.mu = nn.Linear(512 * 4 * 4, latent_dim)
         self.logvar = nn.Linear(512 * 4 * 4, latent_dim)
-        # v14 init that worked - normal variance, let clamps handle explosions
-        nn.init.normal_(self.mu.weight, 0, 0.01); nn.init.zeros_(self.mu.bias)
-        nn.init.normal_(self.logvar.weight, 0, 0.01); nn.init.constant_(self.logvar.bias, 1.0)
+        # ULTRA conservative init: zero mu + logvar.bias=-5.0 → std≈0.08, KL≈2.0/dim at start
+        # Keep encoder outputs near zero to avoid massive KL spikes from untrained features.
+        nn.init.zeros_(self.mu.weight)
+        nn.init.zeros_(self.mu.bias)
+        nn.init.zeros_(self.logvar.weight); nn.init.constant_(self.logvar.bias, -5.0)  # Zero weights = pure bias
         
         self.dec_lin = nn.Linear(latent_dim, 512 * 4 * 4)
         self.dec = nn.Sequential(
@@ -70,7 +72,8 @@ class ConvVAE(nn.Module):
         return mu, logvar
     
     def reparameterize(self, mu, logvar):
-        return mu + torch.exp(0.5 * logvar) * torch.randn_like(logvar)
+        logvar_safe = torch.clamp(logvar, min=-30.0, max=20.0)
+        return mu + torch.exp(0.5 * logvar_safe) * torch.randn_like(logvar)
     
     def decode(self, z):
         return self.dec(self.dec_lin(z).view(-1, 512, 4, 4))

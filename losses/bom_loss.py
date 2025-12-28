@@ -367,7 +367,10 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     group_core = geometric_mean([g_core_mse, g_core_edge])
     group_swap = geometric_mean([g_swap_structure, g_swap_appearance, g_swap_color_hist])
     group_realism = geometric_mean([g_realism_recon, g_realism_swap])
-    group_disentangle = geometric_mean([g_core_color_leak, g_detail_edge_leak])
+    # Disentangle: Add epsilon to prevent crash when leak=0 at init (collapsed encoder)
+    # Other groups crash on zero (fail-fast) - only disentangle can legitimately be 0
+    group_disentangle = geometric_mean([torch.clamp(g_core_color_leak, min=1e-8),
+                                        torch.clamp(g_detail_edge_leak, min=1e-8)])
     group_latent = geometric_mean([g_kl_core, g_kl_detail, g_logvar_core, g_logvar_detail, g_cov, g_weak, g_consistency, g_detail_mean, g_detail_var_mean, g_detail_cov])
     group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var, g_core_var_max, g_detail_var_max])
 

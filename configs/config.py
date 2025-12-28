@@ -77,8 +77,8 @@ GOAL_SPECS = {
 
     # Latent group - KL and statistical health
     # Start with only LOWER bound, add upper bound at epoch 25 once KL stabilizes
-    'kl_core': {'type': ConstraintType.LOWER, 'lower': 10},
-    'kl_detail': {'type': ConstraintType.LOWER, 'lower': 10},
+    'kl_core': {'type': ConstraintType.LOWER, 'margin': 10},
+    'kl_detail': {'type': ConstraintType.LOWER, 'margin': 10},
     'cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'weak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.1},
     'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},

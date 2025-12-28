@@ -126,14 +126,17 @@ for epoch in range(1, EPOCHS + 1):
                 print(f"    detail_var_mean: [0.1, 50]")
 
             elif target_group == 'health':
-                # Tighten health constraints: [0.001, 0.70] → [0.05, 0.50], [0.01, 300] → [0.1, 50]
+                # Tighten health constraints: [0.0, 0.70] → [0.05, 0.50], [0.0, 300] → [0.1, 50]
                 GOAL_SPECS['detail_ratio']['lower'] = 0.05
                 GOAL_SPECS['detail_ratio']['upper'] = 0.50
+                GOAL_SPECS['detail_var_mean']['lower'] = 0.1
+                GOAL_SPECS['detail_var_mean']['upper'] = 50.0
                 GOAL_SPECS['core_var_health']['lower'] = 0.1
                 GOAL_SPECS['core_var_health']['upper'] = 50.0
                 GOAL_SPECS['detail_var_health']['lower'] = 0.1
                 GOAL_SPECS['detail_var_health']['upper'] = 50.0
                 print(f"    detail_ratio: [0.05, 0.50]")
+                print(f"    detail_var_mean: [0.1, 50]")
                 print(f"    variance health: [0.1, 50]")
 
             elif target_group in ['recon', 'core', 'swap', 'realism', 'disentangle']:

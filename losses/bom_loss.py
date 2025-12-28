@@ -150,6 +150,10 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     kl_per_dim_detail = -0.5 * (1 + logvar_detail - mu_detail.pow(2) - logvar_detail.exp())
     losses['kl_detail'] = kl_per_dim_detail.sum(dim=1).mean().item()
 
+    # Direct logvar values - prevent explosion
+    losses['logvar_core'] = logvar_core.mean().item()
+    losses['logvar_detail'] = logvar_detail.mean().item()
+
     z_c = z_core - z_core.mean(0, keepdim=True)  # No clamp on z
     cov = (z_c.T @ z_c) / (B - 1 + 1e-8)
     diag = torch.diag(cov) + 1e-8
@@ -305,7 +309,13 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     kl_per_dim_detail = -0.5 * (1 + logvar_detail - mu_detail.pow(2) - logvar_detail.exp())
     kl_detail_val = kl_per_dim_detail.sum(dim=1).mean()
     g_kl_detail = goals.goal(kl_detail_val, 'kl_detail')
-    
+
+    # Direct logvar constraints - prevent exp(logvar) from exploding to Inf
+    logvar_core_mean = logvar_core.mean()
+    g_logvar_core = goals.goal(logvar_core_mean, 'logvar_core')
+    logvar_detail_mean = logvar_detail.mean()
+    g_logvar_detail = goals.goal(logvar_detail_mean, 'logvar_detail')
+
     z_c = z_core - z_core.mean(0, keepdim=True)  # No clamp on z
     cov = (z_c.T @ z_c) / (B - 1 + 1e-8)
     diag = torch.diag(cov) + 1e-8
@@ -354,7 +364,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     group_swap = geometric_mean([g_swap_structure, g_swap_appearance, g_swap_color_hist])
     group_realism = geometric_mean([g_realism_recon, g_realism_swap])
     group_disentangle = geometric_mean([g_core_color_leak, g_detail_edge_leak])
-    group_latent = geometric_mean([g_kl_core, g_kl_detail, g_cov, g_weak, g_consistency, g_detail_mean, g_detail_var_mean, g_detail_cov])
+    group_latent = geometric_mean([g_kl_core, g_kl_detail, g_logvar_core, g_logvar_detail, g_cov, g_weak, g_consistency, g_detail_mean, g_detail_var_mean, g_detail_cov])
     group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var, g_core_var_max, g_detail_var_max])
 
     groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_disentangle, group_latent, group_health])
@@ -382,6 +392,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'realism_swap': g_realism_swap.item() if isinstance(g_realism_swap, torch.Tensor) else g_realism_swap,
         'core_color_leak': g_core_color_leak.item(), 'detail_edge_leak': g_detail_edge_leak.item(),
         'kl_core': g_kl_core.item(), 'kl_detail': g_kl_detail.item(),
+        'logvar_core': g_logvar_core.item(), 'logvar_detail': g_logvar_detail.item(),
         'cov': g_cov.item(), 'weak': g_weak.item(),
         'consistency': g_consistency.item() if isinstance(g_consistency, torch.Tensor) else g_consistency,
         'detail_mean': g_detail_mean.item(), 'detail_var_mean': g_detail_var_mean.item(), 'detail_cov': g_detail_cov.item(),
@@ -394,6 +405,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     raw_values = {
         'kl_core_raw': kl_core_val.item(), 'kl_detail_raw': kl_detail_val.item(),
+        'logvar_core_raw': logvar_core_mean.item(), 'logvar_detail_raw': logvar_detail_mean.item(),
         'detail_ratio_raw': detail_ratio.item(),
         'core_var_raw': core_var_median.item(), 'detail_var_raw': detail_var_median.item(),
         'core_var_max_raw': core_var_max.item(), 'detail_var_max_raw': detail_var_max.item(),

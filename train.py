@@ -61,6 +61,7 @@ def apply_augmentation(x):
 histories = {
     'loss': [], 'min_group': [], 'bottleneck': [], 'ssim': [], 'mse': [], 'edge': [],
     'kl_core_raw': [], 'kl_detail_raw': [],
+    'logvar_core_raw': [], 'logvar_detail_raw': [],
     'detail_ratio_raw': [], 'core_var_raw': [], 'detail_var_raw': [],
     'core_var_max_raw': [], 'detail_var_max_raw': [], 'consistency_raw': [],
     'structure_loss': [], 'appearance_loss': [], 'color_hist_loss': [],
@@ -247,8 +248,9 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['mse'].append(result['mse'])
             epoch_data['edge'].append(result['edge_loss'])
 
-            # v15: Updated raw values including leak detection
-            for k in ['kl_core_raw', 'kl_detail_raw', 'detail_ratio_raw', 'core_var_raw', 'detail_var_raw',
+            # v15: Updated raw values including leak detection and logvar tracking
+            for k in ['kl_core_raw', 'kl_detail_raw', 'logvar_core_raw', 'logvar_detail_raw',
+                     'detail_ratio_raw', 'core_var_raw', 'detail_var_raw',
                      'core_var_max_raw', 'detail_var_max_raw', 'consistency_raw',
                      'detail_mean_raw', 'detail_var_mean_raw', 'detail_cov_raw',
                      'realism_recon_raw', 'realism_swap_raw',

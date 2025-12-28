@@ -1,5 +1,5 @@
 # models/discriminator.py
-# PatchGAN discriminator with spectral normalization for BOM v15 (introduced in v14)
+# PatchGAN discriminator with spectral normalization for BOM v14
 
 import torch
 import torch.nn as nn

@@ -1,8 +1,7 @@
-# train.py - v15: Progressive group-by-group tightening
-# Based on v14: Discriminator + Detail contracts
+# train.py - v14: Discriminator + Detail contracts + traversal meaning
 # Core = STRUCTURE (edges, geometry)
 # Detail = APPEARANCE (colors, lighting)
-# v15: Tighten one group per epoch (epochs 15,17,19,21,23,25,27) to force focus
+# Tighten one group per epoch (epochs 15,17,19,21,23,25,27) to force focus
 import os, sys, time, copy
 import torch
 import torch.nn.functional as F
@@ -67,13 +66,14 @@ histories = {
     'structure_loss': [], 'appearance_loss': [], 'color_hist_loss': [],
     'realism_recon_raw': [], 'realism_swap_raw': [],
     'core_color_leak_raw': [], 'detail_edge_leak_raw': [],
+    'traversal_raw': [], 'traversal_core_effect_raw': [], 'traversal_detail_effect_raw': [],
     'detail_mean_raw': [], 'detail_var_mean_raw': [], 'detail_cov_raw': [],
     **{f'group_{n}': [] for n in GROUP_NAMES},
     'pixel': [], 'edge_goal': [], 'perceptual': [],
     'core_mse': [], 'core_edge': [],
     'swap_structure': [], 'swap_appearance': [], 'swap_color_hist': [],
     'realism_recon': [], 'realism_swap': [],
-    'core_color_leak': [], 'detail_edge_leak': [],
+    'core_color_leak': [], 'detail_edge_leak': [], 'traversal_goal': [],
     'kl_core_goal': [], 'kl_detail_goal': [],
     'cov_goal': [], 'weak': [], 'consistency_goal': [],
     'detail_mean_goal': [], 'detail_var_mean_goal': [], 'detail_cov_goal': [],
@@ -84,9 +84,10 @@ histories = {
 dim_variance_history = {'core': [], 'detail': []}
 
 print("\n" + "=" * 100)
-print(f"BOM VAE v15 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
-print("v15: Behavioral disentanglement walls (intervention testing)")
-print("     - NEW: Direct leak detection (core→color, detail→edge)")
+print(f"BOM VAE v14 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
+print("v14: Behavioral disentanglement walls (intervention testing)")
+print("     - Direct leak detection (core→color, detail→edge)")
+print("     - Traversal meaning goal (core→edges, detail→color)")
 print("     - PatchGAN discriminator with spectral norm")
 print("     - KL divergence for BOTH core and detail channels")
 print("     - No clamps, fail-fast on barrier violations")
@@ -248,13 +249,14 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['mse'].append(result['mse'])
             epoch_data['edge'].append(result['edge_loss'])
 
-            # v15: Updated raw values including leak detection and logvar tracking
+            # Updated raw values including leak detection and logvar tracking
             for k in ['kl_core_raw', 'kl_detail_raw', 'logvar_core_raw', 'logvar_detail_raw',
                      'detail_ratio_raw', 'core_var_raw', 'detail_var_raw',
                      'core_var_max_raw', 'detail_var_max_raw', 'consistency_raw',
                      'detail_mean_raw', 'detail_var_mean_raw', 'detail_cov_raw',
                      'realism_recon_raw', 'realism_swap_raw',
-                     'core_color_leak_raw', 'detail_edge_leak_raw']:
+                     'core_color_leak_raw', 'detail_edge_leak_raw',
+                     'traversal_raw', 'traversal_core_effect_raw', 'traversal_detail_effect_raw']:
                 epoch_data[k].append(rv.get(k, 0))
             epoch_data['structure_loss'].append(rv['structure_loss'])
             epoch_data['appearance_loss'].append(rv['appearance_loss'])
@@ -275,6 +277,7 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['realism_swap'].append(ig['realism_swap'])
             epoch_data['core_color_leak'].append(ig['core_color_leak'])
             epoch_data['detail_edge_leak'].append(ig['detail_edge_leak'])
+            epoch_data['traversal_goal'].append(ig['traversal'])
             epoch_data['kl_core_goal'].append(ig['kl_core'])
             epoch_data['kl_detail_goal'].append(ig['kl_detail'])
             epoch_data['cov_goal'].append(ig['cov'])
@@ -340,8 +343,8 @@ torch.save({
     'histories': histories,
     'scales': goal_system.scales,
     'dim_var': dim_variance_history
-}, f'{OUTPUT_DIR}/bom_vae_v15.pt')
-print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v15.pt")
+}, f'{OUTPUT_DIR}/bom_vae_v14.pt')
+print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v14.pt")
 
 # EVAL
 print("\n" + "=" * 60 + "\nEVALUATION\n" + "=" * 60)
@@ -374,7 +377,7 @@ print(f"\n  MSE:   {mse_t/(cnt*3*64*64):.6f}\n  SSIM:  {np.mean(ss):.4f}\n  LPIP
 # VIZ
 print("\nGenerating visualizations...")
 samples, _ = next(iter(train_loader))
-plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v15 - {data_info['name']}")
+plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v14 - {data_info['name']}")
 plot_reconstructions(model, samples, split_idx, f'{OUTPUT_DIR}/reconstructions.png', DEVICE)
 plot_traversals(model, samples, split_idx, f'{OUTPUT_DIR}/traversals_core.png', f'{OUTPUT_DIR}/traversals_detail.png', NUM_TRAVERSE_DIMS, DEVICE)
 plot_cross_reconstruction(model, samples, split_idx, f'{OUTPUT_DIR}/cross_reconstruction.png', DEVICE)

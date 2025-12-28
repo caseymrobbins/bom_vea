@@ -113,15 +113,15 @@ for epoch in range(1, EPOCHS + 1):
             print(f"\n🔧 Epoch {epoch}: TIGHTENING '{target_group.upper()}' GROUP...")
 
             if target_group == 'latent':
-                # Add upper bounds to KL: LOWER(10) → BOX_ASYMMETRIC[50, 5000]
+                # Add upper bounds to KL: LOWER(1.0) → BOX_ASYMMETRIC[50, 5000]
                 GOAL_SPECS['kl_core'] = {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 5000, 'healthy': 1000}
                 GOAL_SPECS['kl_detail'] = {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 5000, 'healthy': 1000}
-                # Tighten detail contracts: [-15, 15] → [-3, 3], [0.01, 300] → [0.1, 50]
+                # Tighten detail contracts: [-15, 15] → [-3, 3], [0.01, 350] → [0.1, 50]
                 GOAL_SPECS['detail_mean']['lower'] = -3.0
                 GOAL_SPECS['detail_mean']['upper'] = 3.0
                 GOAL_SPECS['detail_var_mean']['lower'] = 0.1
                 GOAL_SPECS['detail_var_mean']['upper'] = 50.0
-                print(f"    KL: LOWER(10) → BOX_ASYMMETRIC[50, 5000] healthy=1000")
+                print(f"    KL: LOWER(1.0) → BOX_ASYMMETRIC[50, 5000] healthy=1000")
                 print(f"    detail_mean: [-3, 3]")
                 print(f"    detail_var_mean: [0.1, 50]")
 

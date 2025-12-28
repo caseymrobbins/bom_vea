@@ -43,7 +43,7 @@ def make_normalizer_torch(ctype: ConstraintType, **kwargs) -> Callable:
     
     if ctype == ConstraintType.MINIMIZE_SOFT:
         scale = kwargs["scale"]
-        return lambda x: 1.0 / (1.0 + torch.clamp(x, min=0.0) / scale) if scale > 0 else torch.zeros_like(x)
+        return lambda x: torch.exp(-torch.clamp(x, min=0.0) / scale) if scale > 0 else torch.zeros_like(x)
     
     if ctype == ConstraintType.MINIMIZE_HARD:
         scale = kwargs.get("scale", 1.0)

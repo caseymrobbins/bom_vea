@@ -80,6 +80,12 @@ GOAL_SPECS = {
     # Margin lowered to 1.0 since ultra-conservative init (logvar.bias=-5.0) gives KL~0.4
     'kl_core': {'type': ConstraintType.LOWER, 'margin': 1.0},
     'kl_detail': {'type': ConstraintType.LOWER, 'margin': 1.0},
+
+    # Direct logvar constraints to prevent exp(logvar) explosion
+    # logvar∈[-10,10] → std∈[0.007, 148] → prevents numerical overflow
+    'logvar_core': {'type': ConstraintType.BOX, 'lower': -10.0, 'upper': 10.0},
+    'logvar_detail': {'type': ConstraintType.BOX, 'lower': -10.0, 'upper': 10.0},
+
     'cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'weak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.1},
     'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},

@@ -106,15 +106,15 @@ GOAL_SPECS = {
 
 # Progressive tightening: one group per epoch, spaced 2 epochs apart
 # BOM will focus on each group for 1-2 epochs as it becomes the bottleneck
+# NOTE: Only tighten MINIMIZE_SOFT groups (recalibrate to current performance)
+#       BOX constraints (latent, health) can't be safely tightened mid-training
 TIGHTENING_SCHEDULE = {
     15: 'recon',      # Epoch 15: tighten reconstruction
     17: 'core',       # Epoch 17: tighten core structure
     19: 'swap',       # Epoch 19: tighten swap goals
     21: 'realism',    # Epoch 21: tighten discriminator goals
     23: 'disentangle',# Epoch 23: tighten behavioral walls
-    25: 'latent',     # Epoch 25: tighten KL and statistics
-    27: 'health',     # Epoch 27: tighten variance/ratio health
 }
 
-RECALIBRATION_EPOCHS = list(TIGHTENING_SCHEDULE.keys())  # [15, 17, 19, 21, 23, 25, 27]
+RECALIBRATION_EPOCHS = list(TIGHTENING_SCHEDULE.keys())  # [15, 17, 19, 21, 23]
 GROUP_NAMES = ['recon', 'core', 'swap', 'realism', 'disentangle', 'latent', 'health']

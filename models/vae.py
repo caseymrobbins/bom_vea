@@ -70,7 +70,8 @@ class ConvVAE(nn.Module):
         return mu, logvar
     
     def reparameterize(self, mu, logvar):
-        return mu + torch.exp(0.5 * logvar) * torch.randn_like(logvar)
+        logvar_safe = torch.clamp(logvar, min=-30.0, max=20.0)
+        return mu + torch.exp(0.5 * logvar_safe) * torch.randn_like(logvar)
     
     def decode(self, z):
         return self.dec(self.dec_lin(z).view(-1, 512, 4, 4))

@@ -47,11 +47,9 @@ class ConvVAE(nn.Module):
         
         self.mu = nn.Linear(512 * 4 * 4, latent_dim)
         self.logvar = nn.Linear(512 * 4 * 4, latent_dim)
-        # ULTRA conservative init: logvar.bias=-5.0 → exp(-2.5)=0.08 std → KL≈0.003/dim → total≈0.4
-        # Start with near-deterministic encoder, let BOM gradually increase variance
-        # Previous -1.0 still caused KL to explode to 10^30+ due to untrained encoder features
-        nn.init.normal_(self.mu.weight, 0, 0.001); nn.init.zeros_(self.mu.bias)  # Smaller weight init too
-        nn.init.zeros_(self.logvar.weight); nn.init.constant_(self.logvar.bias, -5.0)  # Zero weights = pure bias
+        # v14 init that worked - normal variance, let clamps handle explosions
+        nn.init.normal_(self.mu.weight, 0, 0.01); nn.init.zeros_(self.mu.bias)
+        nn.init.normal_(self.logvar.weight, 0, 0.01); nn.init.constant_(self.logvar.bias, 1.0)
         
         self.dec_lin = nn.Linear(latent_dim, 512 * 4 * 4)
         self.dec = nn.Sequential(
@@ -65,8 +63,10 @@ class ConvVAE(nn.Module):
 
     def encode(self, x):
         h = self.enc(x)
-        mu = self.mu(h)  # v15: No clamp - let BOX constraints enforce bounds
-        logvar = self.logvar(h)  # v15: No clamp - let KL contract enforce bounds
+        mu = self.mu(h)
+        mu = torch.clamp(mu, -50, 50)  # Prevent numerical explosion (BOM goals still enforce actual bounds)
+        logvar = self.logvar(h)
+        logvar = torch.clamp(logvar, -10, 10)  # exp(10)=22k is plenty, prevents overflow not BOM violation
         return mu, logvar
     
     def reparameterize(self, mu, logvar):

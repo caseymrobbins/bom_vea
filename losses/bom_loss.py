@@ -143,11 +143,14 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
         losses['realism_recon'] = 0.5
         losses['realism_swap'] = 0.5
 
-    # v14: KL for BOTH core and detail - no clamps, let BOX constraints enforce bounds
+    # v14: KL for BOTH core and detail WITH clamps to prevent numerical explosion
+    # Clamping KL to [0,50]/dim doesn't change BOM behavior, just prevents 10^30 overflow
     kl_per_dim_core = -0.5 * (1 + logvar_core - mu_core.pow(2) - logvar_core.exp())
+    kl_per_dim_core = torch.clamp(kl_per_dim_core, 0, 50)  # 50/dim is plenty to know it's violated
     losses['kl_core'] = kl_per_dim_core.sum(dim=1).mean().item()
 
     kl_per_dim_detail = -0.5 * (1 + logvar_detail - mu_detail.pow(2) - logvar_detail.exp())
+    kl_per_dim_detail = torch.clamp(kl_per_dim_detail, 0, 50)  # 50/dim is plenty to know it's violated
     losses['kl_detail'] = kl_per_dim_detail.sum(dim=1).mean().item()
 
     # Direct logvar values - prevent explosion
@@ -301,12 +304,15 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     g_core_color_leak = goals.goal(core_color_leak, 'core_color_leak')
     g_detail_edge_leak = goals.goal(detail_edge_leak, 'detail_edge_leak')
 
-    # GROUP F: LATENT QUALITY (v14 - KL for BOTH core and detail) - no clamps
+    # GROUP F: LATENT QUALITY - WITH clamps as numerical safety rails
+    # Clamping KL to [0,50]/dim doesn't change BOM behavior, just prevents 10^30 overflow
     kl_per_dim_core = -0.5 * (1 + logvar_core - mu_core.pow(2) - logvar_core.exp())
+    kl_per_dim_core = torch.clamp(kl_per_dim_core, 0, 50)  # Safety rail, not anti-BOM
     kl_core_val = kl_per_dim_core.sum(dim=1).mean()
     g_kl_core = goals.goal(kl_core_val, 'kl_core')
 
     kl_per_dim_detail = -0.5 * (1 + logvar_detail - mu_detail.pow(2) - logvar_detail.exp())
+    kl_per_dim_detail = torch.clamp(kl_per_dim_detail, 0, 50)  # Safety rail, not anti-BOM
     kl_detail_val = kl_per_dim_detail.sum(dim=1).mean()
     g_kl_detail = goals.goal(kl_detail_val, 'kl_detail')
 

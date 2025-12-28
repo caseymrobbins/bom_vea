@@ -161,5 +161,6 @@ class GoalSystem:
         self.samples = {name: [] for name in self.specs.keys()}
 
 def geometric_mean(goals):
+    """Geometric mean - crashes on exact zero (fail-fast BOM)"""
     goals = torch.stack(goals)
     return goals.prod() ** (1.0 / len(goals))

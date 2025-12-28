@@ -65,8 +65,10 @@ class ConvVAE(nn.Module):
 
     def encode(self, x):
         h = self.enc(x)
-        mu = self.mu(h)  # v15: No clamp - let BOX constraints enforce bounds
-        logvar = self.logvar(h)  # v15: No clamp - let KL contract enforce bounds
+        mu = self.mu(h)
+        mu = torch.clamp(mu, -50, 50)  # Prevent numerical explosion (BOM goals still enforce actual bounds)
+        logvar = self.logvar(h)
+        logvar = torch.clamp(logvar, -10, 10)  # exp(10)=22k is plenty, prevents overflow not BOM violation
         return mu, logvar
     
     def reparameterize(self, mu, logvar):

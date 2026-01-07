@@ -175,8 +175,8 @@ def latent_traversal(model, device, latent_dim=128, n_steps=10, traversal_range=
                 z = base_z.clone()
                 z[0, dim] = val
 
-                # Decode
-                recon = model.decode(z)
+                # Decode using the model's decoder
+                recon = model.dec(model.fc_dec(z).view(-1, 256, 4, 4))
 
                 # Plot
                 ax = axes[i, j] if n_dims_to_show > 1 else axes[j]
@@ -227,7 +227,8 @@ def interpolate_latents(model, loader, device, n_pairs=5, n_steps=10):
 
             for j, alpha in enumerate(alphas):
                 z_interp = (1 - alpha) * z1 + alpha * z2
-                recon = model.decode(z_interp.unsqueeze(0))
+                # Decode using the model's decoder
+                recon = model.dec(model.fc_dec(z_interp.unsqueeze(0)).view(-1, 256, 4, 4))
 
                 ax = axes[i, j+1] if n_pairs > 1 else axes[j+1]
                 ax.imshow(recon[0].cpu().permute(1, 2, 0).numpy())
@@ -265,7 +266,8 @@ def sample_from_prior(model, device, latent_dim=128, n_samples=16):
     z = torch.randn(n_samples, latent_dim, device=device)
 
     with torch.no_grad():
-        samples = model.decode(z)
+        # Decode using the model's decoder
+        samples = model.dec(model.fc_dec(z).view(-1, 256, 4, 4))
 
     # Plot in grid
     n_cols = 8

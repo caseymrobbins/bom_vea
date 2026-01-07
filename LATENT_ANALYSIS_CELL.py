@@ -89,7 +89,8 @@ with torch.no_grad():
         for j, val in enumerate(values):
             z = base_z.clone()
             z[0, dim] = val
-            recon = model_bom.decode(z)
+            # Decode using the model's decoder
+            recon = model_bom.dec(model_bom.fc_dec(z).view(-1, 256, 4, 4))
             axes[i, j].imshow(recon[0].cpu().permute(1, 2, 0).numpy())
             axes[i, j].axis('off')
             if j == 0:
@@ -128,7 +129,8 @@ with torch.no_grad():
         # Interpolate
         for j, alpha in enumerate(np.linspace(0, 1, n_steps)):
             z_interp = (1 - alpha) * z1 + alpha * z2
-            recon = model_bom.decode(z_interp.unsqueeze(0))
+            # Decode using the model's decoder
+            recon = model_bom.dec(model_bom.fc_dec(z_interp.unsqueeze(0)).view(-1, 256, 4, 4))
             axes[i, j+1].imshow(recon[0].cpu().permute(1, 2, 0).numpy())
             axes[i, j+1].axis('off')
 
@@ -148,7 +150,8 @@ print("\nSampling from prior N(0, I)...")
 z_random = torch.randn(16, 128, device=device)
 
 with torch.no_grad():
-    samples = model_bom.decode(z_random)
+    # Decode using the model's decoder
+    samples = model_bom.dec(model_bom.fc_dec(z_random).view(-1, 256, 4, 4))
 
 fig, axes = plt.subplots(2, 8, figsize=(16, 4))
 for i in range(16):

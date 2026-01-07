@@ -76,7 +76,9 @@ if not os.path.exists(celeba_path) or len(os.listdir(celeba_path)) == 0:
     try:
         if not os.path.exists(zip_path):
             print("Attempting automatic download...")
-            gdown.download("https://drive.google.com/uc?id=1xJs_8JB0HYXiaAmU8PTG9qbk0WJ2Wo1U", zip_path, quiet=False)
+            # Try the direct file link format (more reliable)
+            url = "https://drive.google.com/file/d/1xJs_8JB0HYXiaAmU8PTG9qbk0WJ2Wo1U/view?usp=sharing"
+            gdown.download(url, zip_path, quiet=False, fuzzy=True)
 
         if os.path.exists(zip_path):
             print("Extracting dataset...")

@@ -197,7 +197,7 @@ def box_constraint(value, floor_low, optimum, floor_high):
 
 
 def compute_bom_loss(x, x_recon, mu, logvar, mse_floor, kl_floor_low, kl_optimum, kl_floor_high, sharp_ceiling):
-    """Compute BOM loss."""
+    """Compute BOM loss with detailed violation reporting."""
     mse, kl, sharp = compute_metrics(x, x_recon, mu, logvar)
 
     mse_score = regular_constraint_lower_better(mse, mse_floor)
@@ -209,15 +209,27 @@ def compute_bom_loss(x, x_recon, mu, logvar, mse_floor, kl_floor_low, kl_optimum
 
     violations = (s_min <= 0).sum().item()
 
+    # Track which constraints are failing
+    mse_violations = (mse_score <= 0).sum().item()
+    kl_violations = (kl_score <= 0).sum().item()
+    sharp_violations = (sharp_score <= 0).sum().item()
+
     metrics = {
         'mse': mse.mean().item(),
         'kl': kl.mean().item(),
         'sharp': sharp.mean().item(),
+        'mse_max': mse.max().item(),
+        'kl_max': kl.max().item(),
+        'kl_min': kl.min().item(),
+        'sharp_min': sharp.min().item(),
         'mse_score': mse_score.mean().item(),
         'kl_score': kl_score.mean().item(),
         'sharp_score': sharp_score.mean().item(),
         's_min': s_min.mean().item(),
         'violations': violations,
+        'mse_violations': mse_violations,
+        'kl_violations': kl_violations,
+        'sharp_violations': sharp_violations,
     }
 
     if violations > 0:
@@ -231,8 +243,13 @@ def compute_bom_loss(x, x_recon, mu, logvar, mse_floor, kl_floor_low, kl_optimum
     return loss, metrics
 
 
-def calibrate_bom(model, loader, device, n_batches=50):
-    """Calibrate BOM constraints based on model's current outputs."""
+def calibrate_bom(model, loader, device, n_batches=50, extra_margin=1.0):
+    """
+    Calibrate BOM constraints based on model's current outputs.
+
+    Args:
+        extra_margin: Additional safety margin multiplier (1.0 = normal, 2.0 = 2x wider)
+    """
     model.train()  # Important: use train mode for BatchNorm
     all_mse, all_kl, all_sharp = [], [], []
 
@@ -250,30 +267,33 @@ def calibrate_bom(model, loader, device, n_batches=50):
     kl_arr = np.array(all_kl)
     sharp_arr = np.array(all_sharp)
 
+    # More conservative initial bounds with extra margin for robustness
     params = {
-        'mse_floor': mse_arr.max() * 2.0,
-        'kl_floor_low': kl_arr.min() * 0.1,
+        'mse_floor': mse_arr.max() * 2.0 * extra_margin,
+        'kl_floor_low': max(kl_arr.min() * 0.1, 0.1),  # Prevent zero
         'kl_optimum': kl_arr.mean(),
-        'kl_floor_high': kl_arr.max() * 50.0,  # Very loose initially
-        'sharp_ceiling': sharp_arr.mean(),
+        'kl_floor_high': kl_arr.max() * 100.0 * extra_margin,  # Very loose initially, scaled by margin
+        'sharp_ceiling': sharp_arr.mean() * 0.5,  # Start low for sharpness
     }
 
-    print(f"Calibration: MSE={mse_arr.mean():.4f}, KL={kl_arr.mean():.1f}, Sharp={sharp_arr.mean():.4f}")
-    print(f"Initial constraints: mse_floor={params['mse_floor']:.4f}, kl_box=[{params['kl_floor_low']:.1f}, {params['kl_optimum']:.1f}, {params['kl_floor_high']:.1f}]")
+    print(f"Calibration (margin={extra_margin:.1f}x): MSE={mse_arr.mean():.4f} (max={mse_arr.max():.4f}), KL={kl_arr.mean():.1f} (range=[{kl_arr.min():.1f}, {kl_arr.max():.1f}]), Sharp={sharp_arr.mean():.4f}")
+    print(f"Initial constraints: mse_floor={params['mse_floor']:.4f}, kl_box=[{params['kl_floor_low']:.1f}, {params['kl_optimum']:.1f}, {params['kl_floor_high']:.1f}], sharp_ceiling={params['sharp_ceiling']:.4f}")
 
     return params
 
 
 def train_bom_vae(model, loader, device, n_epochs=20):
     """
-    BOM-VAE training with adaptive squeeze.
+    BOM-VAE training with adaptive squeeze and auto-recovery from early failures.
 
     Squeeze rule: squeeze_amount = (s_min - 0.5) * k
     - s_min > 0.5: squeeze proportionally
     - s_min <= 0.5: don't squeeze
+
+    Auto-recovery: If early epochs have too many violations, automatically widen constraints.
     """
-    # Calibrate
-    params = calibrate_bom(model, loader, device)
+    # Calibrate with standard margin
+    params = calibrate_bom(model, loader, device, extra_margin=1.0)
 
     mse_floor = params['mse_floor']
     kl_floor_low = params['kl_floor_low']
@@ -298,6 +318,14 @@ def train_bom_vae(model, loader, device, n_epochs=20):
         model.train()
         epoch_loss, epoch_s_min = [], []
         epoch_violations = 0
+        epoch_mse_violations = 0
+        epoch_kl_violations = 0
+        epoch_sharp_violations = 0
+
+        # Track actual values for reporting
+        epoch_mse_values = []
+        epoch_kl_values = []
+        epoch_sharp_values = []
 
         pbar = tqdm(loader, desc=f"BOM-VAE Epoch {epoch}")
         for batch in pbar:
@@ -319,16 +347,58 @@ def train_bom_vae(model, loader, device, n_epochs=20):
                 epoch_s_min.append(metrics['s_min'])
             else:
                 epoch_violations += metrics['violations']
+                epoch_mse_violations += metrics['mse_violations']
+                epoch_kl_violations += metrics['kl_violations']
+                epoch_sharp_violations += metrics['sharp_violations']
+
+            # Track values
+            epoch_mse_values.append(metrics['mse'])
+            epoch_kl_values.append(metrics['kl'])
+            epoch_sharp_values.append(metrics['sharp'])
 
             history.append(metrics)
-            pbar.set_postfix({'s_min': f"{metrics['s_min']:.3f}", 'kl': f"{metrics['kl']:.0f}"})
+            pbar.set_postfix({'s_min': f"{metrics['s_min']:.3f}", 'kl': f"{metrics['kl']:.0f}", 'viol': epoch_violations})
 
         avg_s_min = np.mean(epoch_s_min) if epoch_s_min else 0
-        print(f"  Epoch {epoch}: s_min={avg_s_min:.3f}, violations={epoch_violations}, mse={metrics['mse']:.4f}, kl={metrics['kl']:.0f}")
-        print(f"    KL box: [{kl_floor_low:.1f}, {kl_optimum:.1f}, {kl_floor_high:.1f}]")
+        violation_rate = epoch_violations / (len(loader) * loader.batch_size) if len(loader) > 0 else 0
 
-        # Adaptive squeeze
-        if epoch >= squeeze_start_epoch and avg_s_min > min_s_min_for_squeeze:
+        print(f"  Epoch {epoch}: s_min={avg_s_min:.3f}, violations={epoch_violations} ({violation_rate*100:.1f}%)")
+        print(f"    Values: MSE={np.mean(epoch_mse_values):.4f} (max={np.max(epoch_mse_values):.4f}), KL={np.mean(epoch_kl_values):.1f} (range=[{np.min(epoch_kl_values):.1f}, {np.max(epoch_kl_values):.1f}]), Sharp={np.mean(epoch_sharp_values):.4f}")
+        print(f"    Constraints: mse_floor={mse_floor:.4f}, kl_box=[{kl_floor_low:.1f}, {kl_optimum:.1f}, {kl_floor_high:.1f}], sharp_ceil={sharp_ceiling:.4f}")
+
+        # Report which constraints are failing
+        if epoch_violations > 0:
+            print(f"    ⚠️  Violations by constraint: MSE={epoch_mse_violations}, KL={epoch_kl_violations}, Sharp={epoch_sharp_violations}")
+
+        # Auto-recovery: If early epochs have >20% violations, widen constraints
+        if epoch <= 3 and violation_rate > 0.2:
+            print(f"    🔧 AUTO-RECOVERY: {violation_rate*100:.1f}% violations detected in early epoch")
+
+            if epoch_mse_violations > 0:
+                old_mse_floor = mse_floor
+                mse_floor = max(np.max(epoch_mse_values) * 3.0, mse_floor * 1.5)
+                print(f"       MSE: Widening floor {old_mse_floor:.4f} -> {mse_floor:.4f}")
+
+            if epoch_kl_violations > 0:
+                old_kl_high = kl_floor_high
+                kl_floor_high = max(np.max(epoch_kl_values) * 2.0, kl_floor_high * 2.0)
+                print(f"       KL: Widening high bound {old_kl_high:.1f} -> {kl_floor_high:.1f}")
+
+                # Also check if KL went below lower bound
+                if np.min(epoch_kl_values) < kl_floor_low:
+                    old_kl_low = kl_floor_low
+                    kl_floor_low = max(np.min(epoch_kl_values) * 0.5, 0.1)
+                    print(f"       KL: Widening low bound {old_kl_low:.1f} -> {kl_floor_low:.1f}")
+
+            if epoch_sharp_violations > 0:
+                old_sharp_ceil = sharp_ceiling
+                sharp_ceiling = np.min(epoch_sharp_values) * 0.8
+                print(f"       Sharp: Lowering ceiling {old_sharp_ceil:.4f} -> {sharp_ceiling:.4f}")
+
+            print(f"    🔁 Continuing with widened constraints...")
+
+        # Adaptive squeeze (only if not too many violations)
+        if epoch >= squeeze_start_epoch and avg_s_min > min_s_min_for_squeeze and violation_rate < 0.1:
             squeeze_amount = (avg_s_min - min_s_min_for_squeeze) * squeeze_k
             squeeze_factor = 1.0 - squeeze_amount  # e.g., s_min=0.9 -> factor=0.8
             squeeze_factor = max(0.5, squeeze_factor)  # Don't squeeze more than 50%

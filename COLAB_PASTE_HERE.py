@@ -42,17 +42,70 @@ if torch.cuda.is_available():
 celeba_path = '/content/celeba'
 zip_path = '/content/celeba.zip'
 
-if not os.path.exists(zip_path):
-    print("Downloading CelebA dataset (~1.4GB)...")
-    gdown.download("https://drive.google.com/uc?id=1xJs_8JB0HYXiaAmU8PTG9qbk0WJ2Wo1U", zip_path, quiet=False)
-
 if not os.path.exists(celeba_path) or len(os.listdir(celeba_path)) == 0:
-    print("Extracting dataset...")
-    os.makedirs(celeba_path, exist_ok=True)
-    with zipfile.ZipFile(zip_path, 'r') as z:
-        z.extractall(celeba_path)
+    print("\n" + "="*70)
+    print("CELEBA DATASET REQUIRED")
+    print("="*70)
+    print("\nOption 1: Download from Kaggle (RECOMMENDED)")
+    print("-" * 70)
+    print("1. Go to: https://www.kaggle.com/datasets/jessicali9530/celeba-dataset")
+    print("2. Click 'Download' (requires Kaggle account)")
+    print("3. Upload 'archive.zip' to Colab")
+    print("4. Run this cell again")
+    print("\nOption 2: Use Kaggle API (if you have kaggle.json)")
+    print("-" * 70)
+    print("Run these commands in a separate cell:")
+    print("  !pip install kaggle")
+    print("  !mkdir -p ~/.kaggle")
+    print("  # Upload your kaggle.json to /content/")
+    print("  !cp /content/kaggle.json ~/.kaggle/")
+    print("  !chmod 600 ~/.kaggle/kaggle.json")
+    print("  !kaggle datasets download -d jessicali9530/celeba-dataset")
+    print("  !unzip -q celeba-dataset.zip -d /content/celeba")
+    print("\nOption 3: Google Drive (manual)")
+    print("-" * 70)
+    print("1. Download from: https://drive.google.com/drive/folders/0B7EVK8r0v71pWEZsZE9oNnFzTm8")
+    print("2. Upload img_align_celeba.zip to your Google Drive")
+    print("3. Mount Drive in Colab:")
+    print("  from google.colab import drive")
+    print("  drive.mount('/content/drive')")
+    print("  !unzip /content/drive/MyDrive/img_align_celeba.zip -d /content/celeba")
+    print("\nOption 4: Try automatic download (may fail due to rate limits)")
+    print("-" * 70)
+
+    try:
+        if not os.path.exists(zip_path):
+            print("Attempting automatic download...")
+            gdown.download("https://drive.google.com/uc?id=1xJs_8JB0HYXiaAmU8PTG9qbk0WJ2Wo1U", zip_path, quiet=False)
+
+        if os.path.exists(zip_path):
+            print("Extracting dataset...")
+            os.makedirs(celeba_path, exist_ok=True)
+            with zipfile.ZipFile(zip_path, 'r') as z:
+                z.extractall(celeba_path)
+            print("✓ Extraction complete!")
+    except Exception as e:
+        print(f"\n⚠️  Automatic download failed: {e}")
+        print("\nPlease use one of the manual methods above.")
+        print("After downloading, the structure should be:")
+        print("  /content/celeba/")
+        print("    └── img_align_celeba/")
+        print("        ├── 000001.jpg")
+        print("        ├── 000002.jpg")
+        print("        └── ...")
+        raise RuntimeError("CelebA dataset not found. Please download manually (see instructions above).")
 
 num_images = len(glob.glob(f"{celeba_path}/**/*.jpg", recursive=True))
+if num_images == 0:
+    print("\n❌ No images found!")
+    print("Expected structure:")
+    print("  /content/celeba/")
+    print("    └── img_align_celeba/")
+    print("        ├── 000001.jpg")
+    print("        ├── 000002.jpg")
+    print("        └── ...")
+    raise RuntimeError("CelebA dataset not found. Please download manually.")
+
 print(f"✓ Found {num_images:,} images\n")
 
 # ==================== VAE MODEL ====================

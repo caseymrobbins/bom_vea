@@ -38,6 +38,11 @@ Google Drive automatic downloads are rate-limited. Here are the best alternative
 
 ## Alternative: Google Drive (Manual)
 
+### Direct Download Link:
+- **Link**: https://drive.google.com/file/d/1xJs_8JB0HYXiaAmU8PTG9qbk0WJ2Wo1U/view?usp=sharing
+- Download manually from browser if automatic download fails
+- Upload to Colab and extract
+
 ### If you have CelebA in your Drive already:
 ```python
 from google.colab import drive

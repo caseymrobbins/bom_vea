@@ -333,9 +333,9 @@ def train_bom_vae(model, loader, device, n_epochs=20):
                 sharp_ceiling = np.min(epoch_sharp_values) * 0.8
                 print(f"       Sharp: Lowered ceiling to {sharp_ceiling:.4f}")
 
-        # Adaptive squeeze (only if not too many violations)
-        if epoch >= 3 and avg_s_min > 0.5 and violation_rate < 0.1:
-            squeeze_factor = max(0.5, 1.0 - (avg_s_min - 0.5) * 0.5)
+        # Adaptive squeeze (only if not too many violations) - gentler settings
+        if epoch >= 5 and avg_s_min > 0.5 and violation_rate < 0.1:
+            squeeze_factor = max(0.5, 1.0 - (avg_s_min - 0.5) * 0.3)  # 0.3 instead of 0.5
             print(f"    🔧 Squeeze: factor={squeeze_factor:.2f}")
             mse_floor *= squeeze_factor
             kl_floor_low = min(kl_floor_low + (50 - kl_floor_low) * (1 - squeeze_factor), 50)
@@ -345,7 +345,7 @@ def train_bom_vae(model, loader, device, n_epochs=20):
     return history
 
 # ==================== RUN COMPARISON ====================
-N_EPOCHS = 20  # Change to 5 for quick test
+N_EPOCHS = 30  # Increased from 20 for better convergence (change to 5 for quick test)
 results = {}
 
 print(f"\n{'='*60}\nTRAINING COMPARISON: {N_EPOCHS} EPOCHS\n{'='*60}\n")

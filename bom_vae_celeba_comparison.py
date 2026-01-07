@@ -306,10 +306,10 @@ def train_bom_vae(model, loader, device, n_epochs=20):
     target_kl_optimum = 80
     target_kl_floor_high = 150
 
-    # Adaptive squeeze settings
-    squeeze_k = 0.5  # Gain factor
+    # Adaptive squeeze settings (gentler than before)
+    squeeze_k = 0.3  # Gain factor (reduced from 0.5 for gentler squeeze)
     min_s_min_for_squeeze = 0.5
-    squeeze_start_epoch = 3
+    squeeze_start_epoch = 5  # Start later (was 3)
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     history = []

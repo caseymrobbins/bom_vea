@@ -382,12 +382,16 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         # Softmin: smooth approximation of min (UNSTABLE - disabled in config)
         min_group = softmin(groups, softmin_temperature)
         min_group_idx = groups.argmin()  # Still track which group is weakest
-        loss = -torch.log(min_group)  # Pure log barrier, NO EPSILON even for softmin!
     else:
         # Hard min: original BOM barrier (ACTIVE)
         min_group = groups.min()
         min_group_idx = groups.argmin()
-        loss = -torch.log(min_group)  # Pure log barrier, NO EPSILON!
+
+    # LBO Directive #4: Reject S_min ≤ 0 BEFORE log calculation to prevent crash
+    if min_group <= 0:
+        return None  # Trigger rollback - constraint violated
+
+    loss = -torch.log(min_group)  # Pure log barrier, NO EPSILON!
     if torch.isnan(loss): return None
 
     individual_goals = {

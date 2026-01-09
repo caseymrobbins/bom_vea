@@ -43,7 +43,7 @@ def make_normalizer_torch(ctype: ConstraintType, **kwargs) -> Callable:
     
     if ctype == ConstraintType.MINIMIZE_SOFT:
         scale = kwargs["scale"]
-        return lambda x: 1.0 / (1.0 + torch.clamp(x, min=0.0) / scale) if scale > 0 else torch.zeros_like(x)
+        return lambda x: torch.exp(-torch.clamp(x, min=0.0) / scale) if scale > 0 else torch.zeros_like(x)
     
     if ctype == ConstraintType.MINIMIZE_HARD:
         scale = kwargs.get("scale", 1.0)
@@ -70,15 +70,26 @@ class GoalSystem:
         print("\n" + "=" * 60)
         print(f"CALIBRATING GOALS (#{self.calibration_count}, epoch {epoch})")
         print("=" * 60)
-        
+
+        # Verify BOX constraints contain initial values
+        box_violations = []
+
         for name, spec in self.specs.items():
             ctype = spec['type']
             if ctype == ConstraintType.MINIMIZE_SOFT and spec.get('scale') == 'auto':
                 if self.samples.get(name):
                     median = np.median(self.samples[name])
-                    self.scales[name] = max(median, 1e-6)
+                    min_val = np.min(self.samples[name])
+                    max_val = np.max(self.samples[name])
+                    mean_val = np.mean(self.samples[name])
+                    # Use max if median is near zero (prevents over-sensitivity)
+                    # Minimum scale 0.001 to prevent goals from collapsing to zero
+                    if median < 1e-4:
+                        self.scales[name] = max(max_val, 0.001)
+                    else:
+                        self.scales[name] = max(median, 0.001)
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
-                    print(f"  {name:20s}: scale={self.scales[name]:.4f}")
+                    print(f"  {name:20s}: scale={self.scales[name]:.4f} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
                 else:
                     self.scales[name] = 1.0
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=1.0)
@@ -86,16 +97,57 @@ class GoalSystem:
             elif ctype == ConstraintType.MINIMIZE_SOFT:
                 self.scales[name] = spec['scale']
                 self.normalizers[name] = make_normalizer_torch(ctype, scale=spec['scale'])
-                print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed)")
+                if self.samples.get(name):
+                    min_val = np.min(self.samples[name])
+                    max_val = np.max(self.samples[name])
+                    mean_val = np.mean(self.samples[name])
+                    median = np.median(self.samples[name])
+                    print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed) | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
+                else:
+                    print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed)")
             elif ctype == ConstraintType.BOX:
                 self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'])
-                print(f"  {name:20s}: BOX [{spec['lower']:.2f}, {spec['upper']:.2f}]")
+                if self.samples.get(name):
+                    median = np.median(self.samples[name])
+                    min_val = np.min(self.samples[name])
+                    max_val = np.max(self.samples[name])
+                    print(f"  {name:20s}: BOX [{spec['lower']:.2f}, {spec['upper']:.2f}] | init=[{min_val:.2f}, {max_val:.2f}] median={median:.2f}")
+                    if min_val < spec['lower'] or max_val > spec['upper']:
+                        box_violations.append(f"{name}: init range [{min_val:.2f}, {max_val:.2f}] outside BOX [{spec['lower']:.2f}, {spec['upper']:.2f}]")
+                else:
+                    print(f"  {name:20s}: BOX [{spec['lower']:.2f}, {spec['upper']:.2f}] (no samples)")
             elif ctype == ConstraintType.BOX_ASYMMETRIC:
                 self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'], healthy=spec['healthy'])
-                print(f"  {name:20s}: BOX_ASYM [{spec['lower']:.0f}, {spec['upper']:.0f}] h={spec['healthy']:.0f}")
+                if self.samples.get(name):
+                    median = np.median(self.samples[name])
+                    min_val = np.min(self.samples[name])
+                    max_val = np.max(self.samples[name])
+                    print(f"  {name:20s}: BOX_ASYM [{spec['lower']:.0f}, {spec['upper']:.0f}] h={spec['healthy']:.0f} | init=[{min_val:.0f}, {max_val:.0f}] median={median:.0f}")
+                    if min_val < spec['lower'] or max_val > spec['upper']:
+                        box_violations.append(f"{name}: init range [{min_val:.0f}, {max_val:.0f}] outside BOX [{spec['lower']:.0f}, {spec['upper']:.0f}]")
+                else:
+                    print(f"  {name:20s}: BOX_ASYM [{spec['lower']:.0f}, {spec['upper']:.0f}] h={spec['healthy']:.0f} (no samples)")
+            elif ctype == ConstraintType.LOWER:
+                self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
+                if self.samples.get(name):
+                    margin = spec['margin']
+                    min_val = np.min(self.samples[name])
+                    max_val = np.max(self.samples[name])
+                    mean_val = np.mean(self.samples[name])
+                    median = np.median(self.samples[name])
+                    print(f"  {name:20s}: LOWER(margin={margin:.0f}) | raw: [{min_val:.0f}, {max_val:.0f}] mean={mean_val:.0f} median={median:.0f}")
+                else:
+                    print(f"  {name:20s}: LOWER(margin={spec['margin']:.0f}) (no samples)")
             else:
                 self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
-        
+
+        if box_violations:
+            print("\n⚠️  WARNING: BOX CONSTRAINT VIOLATIONS ⚠️")
+            for violation in box_violations:
+                print(f"    {violation}")
+            print("    These constraints will return goal=0 → loss=inf → crash!")
+            print("    ACTION: Widen BOX bounds to contain initialization values.\n")
+
         print("=" * 60 + "\n")
         self.calibrated = True
         self.samples = {name: [] for name in self.specs.keys()}
@@ -109,5 +161,6 @@ class GoalSystem:
         self.samples = {name: [] for name in self.specs.keys()}
 
 def geometric_mean(goals):
+    """Geometric mean - crashes on exact zero (fail-fast BOM)"""
     goals = torch.stack(goals)
     return goals.prod() ** (1.0 / len(goals))

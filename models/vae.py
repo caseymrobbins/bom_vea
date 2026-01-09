@@ -47,8 +47,11 @@ class ConvVAE(nn.Module):
         
         self.mu = nn.Linear(512 * 4 * 4, latent_dim)
         self.logvar = nn.Linear(512 * 4 * 4, latent_dim)
-        nn.init.zeros_(self.mu.weight); nn.init.zeros_(self.mu.bias)
-        nn.init.zeros_(self.logvar.weight); nn.init.constant_(self.logvar.bias, -2.0)
+        # ULTRA conservative init: zero mu + logvar.bias=-5.0 → std≈0.08, KL≈2.0/dim at start
+        # Keep encoder outputs near zero to avoid massive KL spikes from untrained features.
+        nn.init.zeros_(self.mu.weight)
+        nn.init.zeros_(self.mu.bias)
+        nn.init.zeros_(self.logvar.weight); nn.init.constant_(self.logvar.bias, -5.0)  # Zero weights = pure bias
         
         self.dec_lin = nn.Linear(latent_dim, 512 * 4 * 4)
         self.dec = nn.Sequential(
@@ -63,11 +66,14 @@ class ConvVAE(nn.Module):
     def encode(self, x):
         h = self.enc(x)
         mu = self.mu(h)
-        logvar = torch.clamp(self.logvar(h), -8, 3)
+        mu = torch.clamp(mu, -50, 50)  # Prevent numerical explosion (BOM goals still enforce actual bounds)
+        logvar = self.logvar(h)
+        logvar = torch.clamp(logvar, -10, 10)  # exp(10)=22k is plenty, prevents overflow not BOM violation
         return mu, logvar
     
     def reparameterize(self, mu, logvar):
-        return mu + torch.exp(0.5 * logvar) * torch.randn_like(logvar)
+        logvar_safe = torch.clamp(logvar, min=-30.0, max=20.0)
+        return mu + torch.exp(0.5 * logvar_safe) * torch.randn_like(logvar)
     
     def decode(self, z):
         return self.dec(self.dec_lin(z).view(-1, 512, 4, 4))

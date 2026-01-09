@@ -1,10 +1,20 @@
 # losses/bom_loss.py
-# v13: EXPLICIT structure/appearance separation
+# v14: Discriminator + Detail contracts + meaningful traversal goals
 # r_sw should have: x1's STRUCTURE + x2's APPEARANCE
 
 import torch
 import torch.nn.functional as F
 from losses.goals import geometric_mean
+
+def softmin(x, temperature=0.1):
+    """Smooth approximation of min using LogSumExp trick.
+
+    softmin(x, T) = -T * log(sum(exp(-x / T)))
+
+    As T → 0, this approaches hard min(x).
+    As T → ∞, this approaches mean(x).
+    """
+    return -temperature * torch.logsumexp(-x / temperature, dim=0)
 
 _sobel_x, _sobel_y = None, None
 
@@ -76,16 +86,15 @@ def compute_ssim(x, y, window_size=11):
 def check_tensor(t):
     return not (torch.isnan(t).any() or torch.isinf(t).any())
 
-def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, x_aug=None):
-    """Compute all raw losses for calibration."""
+def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discriminator=None, x_aug=None):
+    """Compute all raw losses for calibration. v14: Discriminator + detail contracts + traversal meaning."""
     B = x.shape[0]
     z_core, z_detail = z[:, :split_idx], z[:, split_idx:]
     mu_core, mu_detail = mu[:, :split_idx], mu[:, split_idx:]
-    logvar_core = logvar[:, :split_idx]
+    logvar_core, logvar_detail = logvar[:, :split_idx], logvar[:, split_idx:]
 
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
-    recon_core = torch.clamp(model.decode(z_core_only), 0, 1)
-    recon = torch.clamp(recon, 0, 1)
+    recon_core = model.decode(z_core_only)  # No clamp - decoder sigmoid handles mapping
 
     with torch.no_grad():
         x_feat = vgg(x)
@@ -93,7 +102,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, x_aug=Non
     edges_x = edges(x)
 
     losses = {}
-    
+
     pixel_mse = F.mse_loss(recon, x)
     ssim_val = compute_ssim(recon, x)
     if torch.isnan(ssim_val): ssim_val = torch.tensor(0.0, device=x.device)
@@ -102,38 +111,56 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, x_aug=Non
     losses['perceptual'] = F.mse_loss(recon_feat, x_feat).item()
     losses['core_mse'] = F.mse_loss(recon_core, x).item()
     losses['core_edge'] = F.mse_loss(edges(recon_core), edges_x).item()
-    
-    # v13: EXPLICIT structure/appearance on swapped reconstruction
+
+    # Structure/appearance on swapped reconstruction
     if B >= 4:
-        # Random permutation for robust pairing
         perm = torch.randperm(B, device=x.device)
         x1, x2 = x, x[perm]
         z1_core, z2_detail = z_core, z_detail[perm]
-        
+
         z_sw = torch.cat([z1_core, z2_detail], dim=1)
-        r_sw = torch.clamp(model.decode(z_sw), 0, 1)
-        
-        # STRUCTURE from x1: edges should match
+        r_sw = model.decode(z_sw)  # No clamp - decoder sigmoid handles mapping
+
         losses['swap_structure'] = F.mse_loss(edges(r_sw), edges(x1)).item()
-        
-        # APPEARANCE from x2: colors should match
         losses['swap_appearance'] = F.mse_loss(mean_color(r_sw), mean_color(x2)).item()
         losses['swap_color_hist'] = F.mse_loss(color_histogram(r_sw), color_histogram(x2)).item()
     else:
         losses['swap_structure'] = 0.1
         losses['swap_appearance'] = 0.01
         losses['swap_color_hist'] = 0.01
-    
-    kl_per_dim = torch.clamp(-0.5 * (1 + logvar_core - mu_core.pow(2) - logvar_core.exp()), 0, 50)
-    losses['kl'] = kl_per_dim.sum(dim=1).mean().item()
-    
-    z_c = torch.clamp(z_core, -10, 10)
-    z_c = z_c - z_c.mean(0, keepdim=True)
+        r_sw = recon  # Fallback for discriminator
+
+    # v14: Discriminator realism scores
+    if discriminator is not None:
+        with torch.no_grad():
+            d_recon = torch.sigmoid(discriminator(recon)).mean()
+            d_swap = torch.sigmoid(discriminator(r_sw)).mean()
+        # We want D scores HIGH (close to 1 = realistic), so loss = (1 - D_score)
+        losses['realism_recon'] = (1.0 - d_recon).item()
+        losses['realism_swap'] = (1.0 - d_swap).item()
+    else:
+        losses['realism_recon'] = 0.5
+        losses['realism_swap'] = 0.5
+
+    # v14: KL for BOTH core and detail - no clamps, let BOX constraints enforce bounds
+    logvar_core_safe = torch.clamp(logvar_core, min=-30.0, max=20.0)
+    kl_per_dim_core = -0.5 * (1 + logvar_core_safe - mu_core.pow(2) - logvar_core_safe.exp())
+    losses['kl_core'] = kl_per_dim_core.sum(dim=1).mean().item()
+
+    logvar_detail_safe = torch.clamp(logvar_detail, min=-30.0, max=20.0)
+    kl_per_dim_detail = -0.5 * (1 + logvar_detail_safe - mu_detail.pow(2) - logvar_detail_safe.exp())
+    losses['kl_detail'] = kl_per_dim_detail.sum(dim=1).mean().item()
+
+    # Direct logvar values - prevent explosion
+    losses['logvar_core'] = logvar_core.mean().item()
+    losses['logvar_detail'] = logvar_detail.mean().item()
+
+    z_c = z_core - z_core.mean(0, keepdim=True)  # No clamp on z
     cov = (z_c.T @ z_c) / (B - 1 + 1e-8)
     diag = torch.diag(cov) + 1e-8
-    losses['cov'] = torch.clamp((cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum(), 0, 50).item()
+    losses['cov'] = ((cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum()).item()  # No clamp on cov
     losses['weak'] = (mu_core.var(0) < 0.1).float().mean().item()
-    
+
     if x_aug is not None:
         with torch.no_grad():
             mu_aug, _ = model.encode(x_aug)
@@ -141,7 +168,44 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, x_aug=Non
         losses['core_consistency'] = F.mse_loss(mu_core, mu_aug_core).item()
     else:
         losses['core_consistency'] = 0.01
-    
+
+    # v14: Detail contracts - ensure detail channel has proper statistics
+    losses['detail_mean'] = mu_detail.mean(0).abs().mean().item()  # Mean across batch, then dims
+    losses['detail_var_mean'] = mu_detail.var(0).mean().item()     # Variance across batch, mean over dims
+
+    # Detail covariance (same as core cov calculation)
+    z_d = z_detail - z_detail.mean(0, keepdim=True)  # No clamp on z
+    cov_d = (z_d.T @ z_d) / (B - 1 + 1e-8)
+    diag_d = torch.diag(cov_d) + 1e-8
+    losses['detail_cov'] = ((cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum()).item()  # No clamp on cov
+
+    # v14: Behavioral checks + traversal meaning (intervention testing)
+    with torch.no_grad():
+        noise_scale = 0.5
+        # Core-only perturbation
+        z_core_pert = z_core + torch.randn_like(z_core) * noise_scale
+        z_pert_core = torch.cat([z_core_pert, z_detail], dim=1)
+        recon_pert_core = model.decode(z_pert_core)
+        # Detail-only perturbation
+        z_detail_pert = z_detail + torch.randn_like(z_detail) * noise_scale
+        z_pert_detail = torch.cat([z_core, z_detail_pert], dim=1)
+        recon_pert_detail = model.decode(z_pert_detail)
+
+    core_color_leak = F.mse_loss(mean_color(recon_pert_core), mean_color(recon))
+    detail_edge_leak = F.mse_loss(edges(recon_pert_detail), edges(recon))
+    losses['core_color_leak'] = core_color_leak.item()
+    losses['detail_edge_leak'] = detail_edge_leak.item()
+
+    core_edge_shift = F.mse_loss(edges(recon_pert_core), edges(recon))
+    detail_color_shift = F.mse_loss(mean_color(recon_pert_detail), mean_color(recon))
+    traversal_loss = 0.5 * (
+        1.0 / (core_edge_shift + 1e-4) +
+        1.0 / (detail_color_shift + 1e-4)
+    )
+    losses['traversal'] = traversal_loss.item()
+    losses['traversal_core_effect'] = core_edge_shift.item()
+    losses['traversal_detail_effect'] = detail_color_shift.item()
+
     detail_contrib = (recon - recon_core).abs().mean()
     losses['detail_ratio'] = (detail_contrib / (recon_core.abs().mean() + 1e-8)).item()
     losses['core_var_health'] = mu_core.var(0).median().item()
@@ -149,24 +213,22 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, x_aug=Non
     losses['core_var_max'] = mu_core.var(0).max().item()
     losses['detail_var_max'] = mu_detail.var(0).max().item()
     losses['_ssim'] = ssim_val.item()
-    
+
     return losses
 
-def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, x_aug=None):
-    """Compute BOM loss with grouped goals. v13: EXPLICIT structure/appearance."""
+def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None, use_softmin=False, softmin_temperature=0.1):
+    """Compute BOM loss with grouped goals. v14: Discriminator + detail contracts + traversal meaning."""
     if not all([check_tensor(t) for t in [recon, x, mu, logvar, z]]):
         return None
-    
+
     B = x.shape[0]
     z_core, z_detail = z[:, :split_idx], z[:, split_idx:]
     mu_core, mu_detail = mu[:, :split_idx], mu[:, split_idx:]
-    logvar_core = logvar[:, :split_idx]
+    logvar_core, logvar_detail = logvar[:, :split_idx], logvar[:, split_idx:]
 
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
-    recon_core = model.decode(z_core_only)
+    recon_core = model.decode(z_core_only)  # No clamp - decoder sigmoid handles mapping
     if not check_tensor(recon_core): return None
-    recon = torch.clamp(recon, 0, 1)
-    recon_core = torch.clamp(recon_core, 0, 1)
 
     with torch.no_grad():
         x_feat = vgg(x)
@@ -187,24 +249,21 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     g_core_mse = goals.goal(F.mse_loss(recon_core, x), 'core_mse')
     g_core_edge = goals.goal(F.mse_loss(edges(recon_core), edges_x), 'core_edge')
     
-    # GROUP C: SWAP - EXPLICIT structure/appearance separation
+    # GROUP C: SWAP - structure/appearance separation
     if B >= 4:
-        # Random permutation for robust pairing
         perm = torch.randperm(B, device=x.device)
         x1, x2 = x, x[perm]
         z1_core, z2_detail = z_core, z_detail[perm]
-        
+
         z_sw = torch.cat([z1_core, z2_detail], dim=1)
-        r_sw = torch.clamp(model.decode(z_sw), 0, 1)
-        
-        # STRUCTURE from x1: edges should match
+        r_sw = model.decode(z_sw)  # No clamp - decoder sigmoid handles mapping
+
         structure_loss = F.mse_loss(edges(r_sw), edges(x1))
         g_swap_structure = goals.goal(structure_loss, 'swap_structure')
-        
-        # APPEARANCE from x2: colors should match
+
         appearance_loss = F.mse_loss(mean_color(r_sw), mean_color(x2))
         g_swap_appearance = goals.goal(appearance_loss, 'swap_appearance')
-        
+
         color_hist_loss = F.mse_loss(color_histogram(r_sw), color_histogram(x2))
         g_swap_color_hist = goals.goal(color_hist_loss, 'swap_color_hist')
     else:
@@ -212,19 +271,86 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         g_swap_appearance = torch.tensor(0.5, device=x.device)
         g_swap_color_hist = torch.tensor(0.5, device=x.device)
         structure_loss = appearance_loss = color_hist_loss = torch.tensor(0.0, device=x.device)
+        r_sw = recon  # Fallback for discriminator
 
-    # GROUP D: LATENT QUALITY
-    kl_per_dim = torch.clamp(-0.5 * (1 + logvar_core - mu_core.pow(2) - logvar_core.exp()), 0, 50)
-    kl_core = kl_per_dim.sum(dim=1).mean()
-    g_kl = goals.goal(kl_core, 'kl')
-    
-    z_c = torch.clamp(z_core, -10, 10) - torch.clamp(z_core, -10, 10).mean(0, keepdim=True)
+    # GROUP D: REALISM (v14 - Discriminator)
+    if discriminator is not None:
+        d_recon_logits = discriminator(recon)
+        d_swap_logits = discriminator(r_sw)
+
+        # Clamp logits to prevent numerical explosion in sigmoid (safety rail, not anti-BOM)
+        # sigmoid(50) ≈ 1.0 and sigmoid(-50) ≈ 0.0, so clamping doesn't change behavior
+        d_recon_logits = torch.clamp(d_recon_logits, -50, 50)
+        d_swap_logits = torch.clamp(d_swap_logits, -50, 50)
+
+        # Want D scores HIGH (realistic), so minimize (1 - sigmoid(D))
+        realism_loss_recon = 1.0 - torch.sigmoid(d_recon_logits).mean()
+        realism_loss_swap = 1.0 - torch.sigmoid(d_swap_logits).mean()
+
+        g_realism_recon = goals.goal(realism_loss_recon, 'realism_recon')
+        g_realism_swap = goals.goal(realism_loss_swap, 'realism_swap')
+    else:
+        g_realism_recon = torch.tensor(0.5, device=x.device)
+        g_realism_swap = torch.tensor(0.5, device=x.device)
+        realism_loss_recon = realism_loss_swap = torch.tensor(0.0, device=x.device)
+
+    # GROUP E: DISENTANGLEMENT - behavioral walls via intervention testing
+    # Test: What happens when we perturb ONLY core or ONLY detail?
+    # Wall 1: Perturbing core should NOT change colors (core doesn't leak into appearance)
+    # Wall 2: Perturbing detail should NOT change edges (detail doesn't leak into structure)
+    # Traversal meaning: perturbations should change their intended targets.
+    # Controlled perturbation magnitude (0.5 std units)
+    noise_scale = 0.5
+
+    # Core-only perturbation: change structure channel, keep appearance channel same
+    z_core_pert = z_core + torch.randn_like(z_core) * noise_scale
+    z_pert_core = torch.cat([z_core_pert, z_detail], dim=1)
+    recon_pert_core = model.decode(z_pert_core)
+
+    # Detail-only perturbation: change appearance channel, keep structure channel same
+    z_detail_pert = z_detail + torch.randn_like(z_detail) * noise_scale
+    z_pert_detail = torch.cat([z_core, z_detail_pert], dim=1)
+    recon_pert_detail = model.decode(z_pert_detail)
+
+    # Measure leaks (should be SMALL)
+    core_color_leak = F.mse_loss(mean_color(recon_pert_core), mean_color(recon))
+    detail_edge_leak = F.mse_loss(edges(recon_pert_detail), edges(recon))
+
+    g_core_color_leak = goals.goal(core_color_leak, 'core_color_leak')
+    g_detail_edge_leak = goals.goal(detail_edge_leak, 'detail_edge_leak')
+
+    core_edge_shift = F.mse_loss(edges(recon_pert_core), edges(recon))
+    detail_color_shift = F.mse_loss(mean_color(recon_pert_detail), mean_color(recon))
+    traversal_loss = 0.5 * (
+        1.0 / (core_edge_shift + 1e-4) +
+        1.0 / (detail_color_shift + 1e-4)
+    )
+    g_traversal = goals.goal(traversal_loss, 'traversal')
+
+    # GROUP F: LATENT QUALITY (v14 - KL for BOTH core and detail) - no clamps
+    logvar_core_safe = torch.clamp(logvar_core, min=-30.0, max=20.0)
+    kl_per_dim_core = -0.5 * (1 + logvar_core_safe - mu_core.pow(2) - logvar_core_safe.exp())
+    kl_core_val = kl_per_dim_core.sum(dim=1).mean()
+    g_kl_core = goals.goal(kl_core_val, 'kl_core')
+
+    logvar_detail_safe = torch.clamp(logvar_detail, min=-30.0, max=20.0)
+    kl_per_dim_detail = -0.5 * (1 + logvar_detail_safe - mu_detail.pow(2) - logvar_detail_safe.exp())
+    kl_detail_val = kl_per_dim_detail.sum(dim=1).mean()
+    g_kl_detail = goals.goal(kl_detail_val, 'kl_detail')
+
+    # Direct logvar constraints - prevent exp(logvar) from exploding to Inf
+    logvar_core_mean = logvar_core.mean()
+    g_logvar_core = goals.goal(logvar_core_mean, 'logvar_core')
+    logvar_detail_mean = logvar_detail.mean()
+    g_logvar_detail = goals.goal(logvar_detail_mean, 'logvar_detail')
+
+    z_c = z_core - z_core.mean(0, keepdim=True)  # No clamp on z
     cov = (z_c.T @ z_c) / (B - 1 + 1e-8)
     diag = torch.diag(cov) + 1e-8
-    cov_penalty = torch.clamp((cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum(), 0, 50)
+    cov_penalty = (cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum()  # No clamp on cov
     g_cov = goals.goal(cov_penalty, 'cov')
     g_weak = goals.goal((mu_core.var(0) < 0.1).float().mean(), 'weak')
-    
+
     if x_aug is not None:
         mu_aug, _ = model.encode(x_aug)
         mu_aug_core = mu_aug[:, :split_idx]
@@ -234,32 +360,62 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         g_consistency = torch.tensor(0.5, device=x.device)
         consistency_loss = torch.tensor(0.0, device=x.device)
 
-    # GROUP E: HEALTH
+    # v14: Detail contracts - ensure detail channel has proper statistics
+    detail_mean_val = mu_detail.mean(0).abs().mean()
+    g_detail_mean = goals.goal(detail_mean_val, 'detail_mean')
+
+    detail_var_mean_val = mu_detail.var(0).mean()
+    g_detail_var_mean = goals.goal(detail_var_mean_val, 'detail_var_mean')
+
+    z_d = z_detail - z_detail.mean(0, keepdim=True)  # No clamp on z
+    cov_d = (z_d.T @ z_d) / (B - 1 + 1e-8)
+    diag_d = torch.diag(cov_d) + 1e-8
+    detail_cov_penalty = (cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum()  # No clamp on cov
+    g_detail_cov = goals.goal(detail_cov_penalty, 'detail_cov')
+
+    # GROUP F: HEALTH
     detail_contrib = (recon - recon_core).abs().mean()
     detail_ratio = detail_contrib / (recon_core.abs().mean() + 1e-8)
     g_detail_ratio = goals.goal(detail_ratio, 'detail_ratio')
-    
+
     core_var_median, detail_var_median = mu_core.var(0).median(), mu_detail.var(0).median()
     g_core_var = goals.goal(core_var_median, 'core_var_health')
     g_detail_var = goals.goal(detail_var_median, 'detail_var_health')
-    
+
     core_var_max, detail_var_max = mu_core.var(0).max(), mu_detail.var(0).max()
     g_core_var_max = goals.goal(core_var_max, 'core_var_max')
     g_detail_var_max = goals.goal(detail_var_max, 'detail_var_max')
 
-    # GROUPED BOM - now with explicit SWAP group
+    # GROUPED BOM - behavioral walls + traversal meaning
     group_recon = geometric_mean([g_pixel, g_edge, g_perceptual])
     group_core = geometric_mean([g_core_mse, g_core_edge])
     group_swap = geometric_mean([g_swap_structure, g_swap_appearance, g_swap_color_hist])
-    group_latent = geometric_mean([g_kl, g_cov, g_weak, g_consistency])
+    # Realism: Add epsilon to prevent crash when discriminator gets too confident (logits → ±50)
+    group_realism = geometric_mean([torch.clamp(g_realism_recon, min=1e-8),
+                                    torch.clamp(g_realism_swap, min=1e-8)])
+    # Disentangle: Add epsilon to prevent crash when leak=0 at init (collapsed encoder)
+    group_disentangle = geometric_mean([torch.clamp(g_core_color_leak, min=1e-8),
+                                        torch.clamp(g_detail_edge_leak, min=1e-8)])
+    group_latent = geometric_mean([
+        g_kl_core, g_kl_detail, g_logvar_core, g_logvar_detail,
+        g_cov, g_weak, g_consistency, g_detail_mean, g_detail_var_mean,
+        g_detail_cov, g_traversal,
+    ])
     group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var, g_core_var_max, g_detail_var_max])
-    
-    groups = torch.stack([group_recon, group_core, group_swap, group_latent, group_health])
+
+    groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_disentangle, group_latent, group_health])
     if torch.isnan(groups).any() or torch.isinf(groups).any(): return None
-    
-    min_group = groups.min()
-    min_group_idx = groups.argmin()
-    loss = -torch.log(min_group)
+
+    if use_softmin:
+        # Softmin: smooth approximation of min (UNSTABLE - disabled in config)
+        min_group = softmin(groups, softmin_temperature)
+        min_group_idx = groups.argmin()  # Still track which group is weakest
+        loss = -torch.log(min_group)  # Pure log barrier, NO EPSILON even for softmin!
+    else:
+        # Hard min: original BOM barrier (ACTIVE)
+        min_group = groups.min()
+        min_group_idx = groups.argmin()
+        loss = -torch.log(min_group)  # Pure log barrier, NO EPSILON!
     if torch.isnan(loss): return None
 
     individual_goals = {
@@ -268,23 +424,40 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'swap_structure': g_swap_structure.item() if isinstance(g_swap_structure, torch.Tensor) else g_swap_structure,
         'swap_appearance': g_swap_appearance.item() if isinstance(g_swap_appearance, torch.Tensor) else g_swap_appearance,
         'swap_color_hist': g_swap_color_hist.item() if isinstance(g_swap_color_hist, torch.Tensor) else g_swap_color_hist,
-        'kl': g_kl.item(), 'cov': g_cov.item(), 'weak': g_weak.item(),
+        'realism_recon': g_realism_recon.item() if isinstance(g_realism_recon, torch.Tensor) else g_realism_recon,
+        'realism_swap': g_realism_swap.item() if isinstance(g_realism_swap, torch.Tensor) else g_realism_swap,
+        'core_color_leak': g_core_color_leak.item(), 'detail_edge_leak': g_detail_edge_leak.item(),
+        'traversal': g_traversal.item(),
+        'kl_core': g_kl_core.item(), 'kl_detail': g_kl_detail.item(),
+        'logvar_core': g_logvar_core.item(), 'logvar_detail': g_logvar_detail.item(),
+        'cov': g_cov.item(), 'weak': g_weak.item(),
         'consistency': g_consistency.item() if isinstance(g_consistency, torch.Tensor) else g_consistency,
+        'detail_mean': g_detail_mean.item(), 'detail_var_mean': g_detail_var_mean.item(), 'detail_cov': g_detail_cov.item(),
         'detail_ratio': g_detail_ratio.item(),
         'core_var': g_core_var.item(), 'detail_var': g_detail_var.item(),
         'core_var_max': g_core_var_max.item(), 'detail_var_max': g_detail_var_max.item(),
     }
-    
+
     group_values = {n: g.item() for n, g in zip(group_names, groups)}
-    
+
     raw_values = {
-        'kl_raw': kl_core.item(), 'detail_ratio_raw': detail_ratio.item(),
+        'kl_core_raw': kl_core_val.item(), 'kl_detail_raw': kl_detail_val.item(),
+        'logvar_core_raw': logvar_core_mean.item(), 'logvar_detail_raw': logvar_detail_mean.item(),
+        'detail_ratio_raw': detail_ratio.item(),
         'core_var_raw': core_var_median.item(), 'detail_var_raw': detail_var_median.item(),
         'core_var_max_raw': core_var_max.item(), 'detail_var_max_raw': detail_var_max.item(),
         'structure_loss': structure_loss.item() if isinstance(structure_loss, torch.Tensor) else structure_loss,
         'appearance_loss': appearance_loss.item() if isinstance(appearance_loss, torch.Tensor) else appearance_loss,
         'color_hist_loss': color_hist_loss.item() if isinstance(color_hist_loss, torch.Tensor) else color_hist_loss,
         'consistency_raw': consistency_loss.item() if isinstance(consistency_loss, torch.Tensor) else consistency_loss,
+        'realism_recon_raw': realism_loss_recon.item() if isinstance(realism_loss_recon, torch.Tensor) else realism_loss_recon,
+        'realism_swap_raw': realism_loss_swap.item() if isinstance(realism_loss_swap, torch.Tensor) else realism_loss_swap,
+        'core_color_leak_raw': core_color_leak.item(), 'detail_edge_leak_raw': detail_edge_leak.item(),
+        'traversal_raw': traversal_loss.item(),
+        'traversal_core_effect_raw': core_edge_shift.item(),
+        'traversal_detail_effect_raw': detail_color_shift.item(),
+        'detail_mean_raw': detail_mean_val.item(), 'detail_var_mean_raw': detail_var_mean_val.item(),
+        'detail_cov_raw': detail_cov_penalty.item(),
     }
     
     return {

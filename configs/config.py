@@ -1,5 +1,6 @@
 # configs/config.py
-# v14: Discriminator + Detail contracts + traversal meaning goal
+# v15: Hierarchical latent constraints + dimension utilization enforcement
+# NEW: Added 4 capacity goals (core_active, detail_active, core_effective, detail_effective)
 
 import torch
 
@@ -88,6 +89,12 @@ GOAL_SPECS = {
     'cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'weak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.1},
     'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
+
+    # v15: Dimension capacity utilization (inactive/ineffective ratios - minimize these)
+    'core_active': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
+    'detail_active': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
+    'core_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
+    'detail_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # v14: Detail contracts - WIDE initial bounds for feasible initialization
     'detail_mean': {'type': ConstraintType.BOX, 'lower': -15.0, 'upper': 15.0},

@@ -103,10 +103,11 @@ GOAL_SPECS = {
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
 }
 
-# LBO Directive #6: Adaptive Squeeze happens naturally
-# As model improves → raw losses decrease → goals approach 1.0 via MINIMIZE_SOFT formula
-# LBO's infinite gradient automatically pushes all groups toward perfection
-# No need for explicit recalibration (can cause instability by suddenly changing scales)
+# LBO Directive #6: Adaptive Squeeze with rollback monitoring
+# After epoch 4 (plateau), tighten ALL constraints slightly each epoch
+# Stop tightening when rollback rate hits 5%+ (system at limit)
+ADAPTIVE_TIGHTENING_START = 5  # Start tightening after epoch 4
+ADAPTIVE_TIGHTENING_RATE = 0.95  # Multiply scales/bounds by this each epoch (5% tighter)
+ROLLBACK_THRESHOLD = 0.05  # Stop tightening when rollback rate hits 5%
 
-RECALIBRATION_EPOCHS = []  # Only calibrate at epoch 1 (initial calibration)
 GROUP_NAMES = ['recon', 'core', 'swap', 'realism', 'disentangle', 'latent', 'health']

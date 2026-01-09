@@ -11,7 +11,7 @@ if torch.cuda.is_available():
     torch.set_float32_matmul_precision('high')
 
 # GPU Optimizations
-USE_TORCH_COMPILE = True  # A100: Significantly speeds up training
+USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during backward pass with LBO rollback mechanism
 
 # Training
 EPOCHS = 35

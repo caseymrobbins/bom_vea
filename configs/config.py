@@ -11,11 +11,11 @@ if torch.cuda.is_available():
     torch.set_float32_matmul_precision('high')
 
 # GPU Optimizations
-USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during backward pass
+USE_TORCH_COMPILE = True  # A100: Significantly speeds up training
 
 # Training
 EPOCHS = 35
-BATCH_SIZE = 256  # L4: 24GB VRAM (A100 used 512 with 40GB)
+BATCH_SIZE = 512  # A100: 40GB VRAM (L4 used 256 with 24GB)
 LEARNING_RATE = 1e-3
 LEARNING_RATE_D = 1e-4  # Discriminator learning rate (slower)
 WEIGHT_DECAY = 1e-5

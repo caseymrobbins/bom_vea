@@ -103,6 +103,7 @@ print("=" * 100 + "\n")
 # Adaptive tightening termination: track when threshold is hit
 threshold_hit_epoch = None
 tightening_rate_idx = 0  # Start with most aggressive (5%)
+previous_goal_specs = None  # For rollback if tightening is too aggressive
 
 for epoch in range(1, EPOCHS + 1):
     t0 = time.time()
@@ -317,12 +318,21 @@ for epoch in range(1, EPOCHS + 1):
     # Adaptive tightening with progressive backoff
     rollback_rate = skip_count / total_batches if total_batches > 0 else 0
 
-    # Check if last tightening was too aggressive (>50% rollbacks)
-    if epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate > ROLLBACK_THRESHOLD_MAX:
+    # Check if last tightening was too aggressive (>50% rollbacks) - RESTORE previous constraints
+    if epoch >= ADAPTIVE_TIGHTENING_START + 1 and rollback_rate > ROLLBACK_THRESHOLD_MAX and previous_goal_specs is not None:
+        print(f"\n⚠️  Rollback rate too high ({rollback_rate*100:.0f}%), RESTORING previous constraints")
+        # Restore the constraints from before tightening
+        for name in GOAL_SPECS:
+            GOAL_SPECS[name] = copy.deepcopy(previous_goal_specs[name])
+        goal_system.specs = GOAL_SPECS
+        goal_system.rebuild_normalizers()
+
+        # Back off to gentler tightening rate
         if tightening_rate_idx < len(ADAPTIVE_TIGHTENING_RATES) - 1:
             tightening_rate_idx += 1
             tightening_pct = int((1 - ADAPTIVE_TIGHTENING_RATES[tightening_rate_idx]) * 100)
-            print(f"\n⚠️  Rollback rate too high ({rollback_rate*100:.0f}%), backing off to {tightening_pct}% tightening")
+            print(f"         Backing off to {tightening_pct}% tightening for future epochs")
+        previous_goal_specs = None  # Clear backup
 
     # Decide if we should tighten this epoch
     current_rate = ADAPTIVE_TIGHTENING_RATES[tightening_rate_idx]
@@ -342,22 +352,30 @@ for epoch in range(1, EPOCHS + 1):
     if should_tighten:
         tightening_pct = int((1 - current_rate) * 100)
         print(f" → 🔧 TIGHTENING {tightening_pct}% (rate < {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")
-        # Tighten MINIMIZE_SOFT scales (makes goals harder to achieve)
+
+        # Save current constraints before tightening (for potential rollback)
+        previous_goal_specs = {name: copy.deepcopy(spec) for name, spec in GOAL_SPECS.items()}
+
+        # Tighten constraints progressively
+        # MINIMIZE_SOFT: Full tightening (harder to satisfy)
         for name, spec in GOAL_SPECS.items():
             if spec['type'] == ConstraintType.MINIMIZE_SOFT and isinstance(spec.get('scale'), (int, float)):
                 spec['scale'] *= current_rate
-        # Tighten BOX constraints (narrow bounds toward center)
+
+        # BOX: Gentler tightening (50% of MINIMIZE_SOFT rate) to avoid boundary violations
+        box_rate = 1.0 - (1.0 - current_rate) * 0.5  # Half the tightening
         for name, spec in GOAL_SPECS.items():
             if spec['type'] in [ConstraintType.BOX, ConstraintType.BOX_ASYMMETRIC]:
                 if 'lower' in spec and 'upper' in spec:
                     center = (spec['lower'] + spec['upper']) / 2
                     range_half = (spec['upper'] - spec['lower']) / 2
-                    new_range_half = range_half * current_rate
+                    new_range_half = range_half * box_rate
                     spec['lower'] = center - new_range_half
                     spec['upper'] = center + new_range_half
-        # Reinitialize goal system with tightened specs
-        goal_system = GoalSystem(GOAL_SPECS)
-        # Don't recalibrate - keep current scales for MINIMIZE_SOFT with auto
+
+        # Update goal_system with tightened specs (rebuild normalizers, keep scales)
+        goal_system.specs = GOAL_SPECS
+        goal_system.rebuild_normalizers()
     else:
         if epoch >= ADAPTIVE_TIGHTENING_START:
             print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")

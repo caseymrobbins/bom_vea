@@ -99,6 +99,9 @@ print("=" * 100 + "\n")
 # last_good_optimizer = copy.deepcopy(optimizer.state_dict())
 # last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
 
+# Adaptive tightening termination: track when threshold is hit
+threshold_hit_epoch = None
+
 for epoch in range(1, EPOCHS + 1):
     t0 = time.time()
     epoch_data = {k: [] for k in histories.keys()}
@@ -311,6 +314,10 @@ for epoch in range(1, EPOCHS + 1):
     rollback_rate = skip_count / total_batches if total_batches > 0 else 0
     should_tighten = epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate < ROLLBACK_THRESHOLD
 
+    # Track when we first hit the threshold
+    if epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate >= ROLLBACK_THRESHOLD and threshold_hit_epoch is None:
+        threshold_hit_epoch = epoch
+
     print(f"\nEpoch {epoch:2d} | Loss: {histories['loss'][-1]:.3f} | Min: {histories['min_group'][-1]:.3f} | SSIM: {histories['ssim'][-1]:.3f}")
     print(f"         Structure: {struct:.4f} | Appearance: {appear:.4f}")
     print(f"         KL_core: {kl_c:.1f} | KL_detail: {kl_d:.1f}")
@@ -341,6 +348,11 @@ for epoch in range(1, EPOCHS + 1):
             print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD*100:.0f}%)")
         else:
             print()
+
+    # Adaptive tightening termination: after hitting threshold, run 1 more epoch then stop
+    if threshold_hit_epoch is not None and epoch > threshold_hit_epoch:
+        print(f"\n🏁 STOPPING: Threshold hit at epoch {threshold_hit_epoch}, completed 1 additional epoch")
+        break
 
 # SAVE
 torch.save({

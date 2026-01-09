@@ -108,11 +108,13 @@ for epoch in range(1, EPOCHS + 1):
     bn_counts = {n: 0 for n in GROUP_NAMES}
     skip_count = 0
     all_mu_core, all_mu_detail = [], []
-    
+
     # LBO Directive #6: Natural adaptive squeeze - no manual recalibration
     # Only calibrate scales at epoch 1, then let LBO's infinite gradient do the work
+    needs_recal = False
     if epoch == 1:
         goal_system.start_recalibration()
+        needs_recal = True
         print(f"\n📊 Epoch 1: Initial calibration of all goal scales...")
 
     model.train()

@@ -105,7 +105,7 @@ def load_dataset(dataset_name, data_path, zip_path=None, image_size=64, batch_si
     
     loader = DataLoader(
         dataset, batch_size=batch_size, shuffle=True,
-        num_workers=8, pin_memory=True, persistent_workers=True, drop_last=True  # A100: increased workers
+        num_workers=8, pin_memory=True, persistent_workers=True, drop_last=True
     )
     
     info = {'name': dataset_name, 'size': len(dataset), 'batches': len(loader), 'image_size': image_size}

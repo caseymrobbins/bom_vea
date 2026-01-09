@@ -355,12 +355,23 @@ for epoch in range(1, EPOCHS + 1):
         # Save current constraints before tightening (for potential rollback)
         previous_goal_specs = {name: copy.deepcopy(spec) for name, spec in GOAL_SPECS.items()}
 
-        # Tighten ONLY MINIMIZE_SOFT scales (makes goals harder to achieve)
-        # NOTE: Do NOT tighten BOX constraints - they're binary (in/out), not progressive
-        # Tightening a BOX can cause instant goal=0 → group=0 → rollback cascade
+        # Tighten constraints progressively
+        # MINIMIZE_SOFT: Full tightening (harder to satisfy)
         for name, spec in GOAL_SPECS.items():
             if spec['type'] == ConstraintType.MINIMIZE_SOFT and isinstance(spec.get('scale'), (int, float)):
                 spec['scale'] *= current_rate
+
+        # BOX: Gentler tightening (50% of MINIMIZE_SOFT rate) to avoid boundary violations
+        box_rate = 1.0 - (1.0 - current_rate) * 0.5  # Half the tightening
+        for name, spec in GOAL_SPECS.items():
+            if spec['type'] in [ConstraintType.BOX, ConstraintType.BOX_ASYMMETRIC]:
+                if 'lower' in spec and 'upper' in spec:
+                    center = (spec['lower'] + spec['upper']) / 2
+                    range_half = (spec['upper'] - spec['lower']) / 2
+                    new_range_half = range_half * box_rate
+                    spec['lower'] = center - new_range_half
+                    spec['upper'] = center + new_range_half
+
         # Reinitialize goal system with tightened specs
         goal_system = GoalSystem(GOAL_SPECS)
         # Don't recalibrate - keep current scales for MINIMIZE_SOFT with auto

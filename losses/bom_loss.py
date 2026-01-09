@@ -1,6 +1,8 @@
 # losses/bom_loss.py
-# v14: Discriminator + Detail contracts + meaningful traversal goals
+# v15: Hierarchical latent constraints + dimension utilization enforcement
 # r_sw should have: x1's STRUCTURE + x2's APPEARANCE
+# NEW: Latent group split into 4 sub-groups (KL, Structure, Capacity, Detail Stats)
+# NEW: Capacity sub-group enforces that all 64 core + 64 detail dims are utilized
 
 import torch
 import torch.nn.functional as F
@@ -202,6 +204,29 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     losses['detail_var_health'] = mu_detail.var(0).median().item()
     losses['core_var_max'] = mu_core.var(0).max().item()
     losses['detail_var_max'] = mu_detail.var(0).max().item()
+
+    # v15: Dimension capacity utilization metrics
+    core_var_per_dim = mu_core.var(0)
+    detail_var_per_dim = mu_detail.var(0)
+    core_active_count = (core_var_per_dim > 0.1).float().sum()
+    detail_active_count = (detail_var_per_dim > 0.1).float().sum()
+    total_dims = float(mu_core.shape[1])
+
+    core_inactive_ratio = (total_dims - core_active_count) / total_dims
+    detail_inactive_ratio = (total_dims - detail_active_count) / total_dims
+    losses['core_active'] = core_inactive_ratio.item()
+    losses['detail_active'] = detail_inactive_ratio.item()
+
+    core_var_norm = core_var_per_dim / (core_var_per_dim.sum() + 1e-8) + 1e-8
+    detail_var_norm = detail_var_per_dim / (detail_var_per_dim.sum() + 1e-8) + 1e-8
+    core_effective = torch.exp(-torch.sum(core_var_norm * torch.log(core_var_norm)))
+    detail_effective = torch.exp(-torch.sum(detail_var_norm * torch.log(detail_var_norm)))
+
+    core_ineffective_ratio = (total_dims - core_effective) / total_dims
+    detail_ineffective_ratio = (total_dims - detail_effective) / total_dims
+    losses['core_effective'] = core_ineffective_ratio.item()
+    losses['detail_effective'] = detail_ineffective_ratio.item()
+
     losses['_ssim'] = ssim_val.item()
 
     return losses
@@ -314,7 +339,9 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     )
     g_traversal = goals.goal(traversal_loss, 'traversal')
 
-    # GROUP F: LATENT QUALITY (v14 - KL for BOTH core and detail) - no clamps
+    # GROUP F: LATENT QUALITY (v15 - Hierarchical with capacity enforcement)
+
+    # SUB-GROUP F1: Distribution Matching (KL constraints)
     logvar_core_safe = torch.clamp(logvar_core, min=-30.0, max=20.0)
     kl_per_dim_core = -0.5 * (1 + logvar_core_safe - mu_core.pow(2) - logvar_core_safe.exp())
     kl_core_val = kl_per_dim_core.sum(dim=1).mean()
@@ -331,6 +358,9 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     logvar_detail_mean = logvar_detail.mean()
     g_logvar_detail = goals.goal(logvar_detail_mean, 'logvar_detail')
 
+    group_kl = geometric_mean([g_kl_core, g_kl_detail, g_logvar_core, g_logvar_detail])
+
+    # SUB-GROUP F2: Independence & Consistency
     z_c = z_core - z_core.mean(0, keepdim=True)  # No clamp on z
     cov = (z_c.T @ z_c) / (B - 1 + 1e-8)
     diag = torch.diag(cov) + 1e-8
@@ -347,7 +377,39 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         g_consistency = torch.tensor(0.5, device=x.device)
         consistency_loss = torch.tensor(0.0, device=x.device)
 
-    # v14: Detail contracts - ensure detail channel has proper statistics
+    group_structure = geometric_mean([g_cov, g_weak, g_consistency])
+
+    # SUB-GROUP F3: Dimension Capacity Utilization (NEW!)
+    # Compute active and effective dimensions
+    core_var_per_dim = mu_core.var(0)  # Variance across batch for each dim
+    detail_var_per_dim = mu_detail.var(0)
+
+    # Active dimensions (variance > threshold)
+    core_active_count = (core_var_per_dim > 0.1).float().sum()
+    detail_active_count = (detail_var_per_dim > 0.1).float().sum()
+    total_dims = float(mu_core.shape[1])  # 64
+
+    # Inactive ratio (want to minimize - fewer inactive dims is better)
+    core_inactive_ratio = (total_dims - core_active_count) / total_dims
+    detail_inactive_ratio = (total_dims - detail_active_count) / total_dims
+    g_core_active = goals.goal(core_inactive_ratio, 'core_active')
+    g_detail_active = goals.goal(detail_inactive_ratio, 'detail_active')
+
+    # Effective dimensions (exponential of entropy)
+    core_var_norm = core_var_per_dim / (core_var_per_dim.sum() + 1e-8) + 1e-8
+    detail_var_norm = detail_var_per_dim / (detail_var_per_dim.sum() + 1e-8) + 1e-8
+    core_effective = torch.exp(-torch.sum(core_var_norm * torch.log(core_var_norm)))
+    detail_effective = torch.exp(-torch.sum(detail_var_norm * torch.log(detail_var_norm)))
+
+    # Ineffective ratio (want to minimize - higher effective dims is better)
+    core_ineffective_ratio = (total_dims - core_effective) / total_dims
+    detail_ineffective_ratio = (total_dims - detail_effective) / total_dims
+    g_core_effective = goals.goal(core_ineffective_ratio, 'core_effective')
+    g_detail_effective = goals.goal(detail_ineffective_ratio, 'detail_effective')
+
+    group_capacity = geometric_mean([g_core_active, g_detail_active, g_core_effective, g_detail_effective])
+
+    # SUB-GROUP F4: Detail Statistics
     detail_mean_val = mu_detail.mean(0).abs().mean()
     g_detail_mean = goals.goal(detail_mean_val, 'detail_mean')
 
@@ -359,6 +421,8 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     diag_d = torch.diag(cov_d) + 1e-8
     detail_cov_penalty = (cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum()  # No clamp on cov
     g_detail_cov = goals.goal(detail_cov_penalty, 'detail_cov')
+
+    group_detail_stats = geometric_mean([g_detail_mean, g_detail_var_mean, g_detail_cov])
 
     # GROUP F: HEALTH
     detail_contrib = (recon - recon_core).abs().mean()
@@ -373,7 +437,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     g_core_var_max = goals.goal(core_var_max, 'core_var_max')
     g_detail_var_max = goals.goal(detail_var_max, 'detail_var_max')
 
-    # GROUPED BOM - v15: Added disentanglement group (behavioral walls)
+    # GROUPED BOM - v15: Hierarchical latent group with capacity enforcement
     # LBO Directive #3: No clamping - all groups must be allowed to reach their natural values
     # If any group → 0, the system WILL crash, triggering Directive #4 rollback
     group_recon = geometric_mean([g_pixel, g_edge, g_perceptual])
@@ -381,7 +445,8 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     group_swap = geometric_mean([g_swap_structure, g_swap_appearance, g_swap_color_hist])
     group_realism = geometric_mean([g_realism_recon, g_realism_swap])
     group_disentangle = geometric_mean([g_core_color_leak, g_detail_edge_leak])
-    group_latent = geometric_mean([g_kl_core, g_kl_detail, g_logvar_core, g_logvar_detail, g_cov, g_weak, g_consistency, g_detail_mean, g_detail_var_mean, g_detail_cov])
+    # HIERARCHICAL: 4 sub-groups (KL, structure, capacity, detail_stats) → latent
+    group_latent = geometric_mean([group_kl, group_structure, group_capacity, group_detail_stats])
     group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var, g_core_var_max, g_detail_var_max])
 
     groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_disentangle, group_latent, group_health])
@@ -413,6 +478,8 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'logvar_core': g_logvar_core.item(), 'logvar_detail': g_logvar_detail.item(),
         'cov': g_cov.item(), 'weak': g_weak.item(),
         'consistency': g_consistency.item() if isinstance(g_consistency, torch.Tensor) else g_consistency,
+        'core_active': g_core_active.item(), 'detail_active': g_detail_active.item(),
+        'core_effective': g_core_effective.item(), 'detail_effective': g_detail_effective.item(),
         'detail_mean': g_detail_mean.item(), 'detail_var_mean': g_detail_var_mean.item(), 'detail_cov': g_detail_cov.item(),
         'detail_ratio': g_detail_ratio.item(),
         'core_var': g_core_var.item(), 'detail_var': g_detail_var.item(),
@@ -424,6 +491,8 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     raw_values = {
         'kl_core_raw': kl_core_val.item(), 'kl_detail_raw': kl_detail_val.item(),
         'logvar_core_raw': logvar_core_mean.item(), 'logvar_detail_raw': logvar_detail_mean.item(),
+        'core_active_raw': core_active_count.item(), 'detail_active_raw': detail_active_count.item(),
+        'core_effective_raw': core_effective.item(), 'detail_effective_raw': detail_effective.item(),
         'detail_ratio_raw': detail_ratio.item(),
         'core_var_raw': core_var_median.item(), 'detail_var_raw': detail_var_median.item(),
         'core_var_max_raw': core_var_max.item(), 'detail_var_max_raw': detail_var_max.item(),

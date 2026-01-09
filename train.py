@@ -1,7 +1,8 @@
-# train.py - v14: Discriminator + Detail contracts + traversal meaning
+# train.py - v15: Hierarchical latent constraints + dimension utilization enforcement
 # Core = STRUCTURE (edges, geometry)
 # Detail = APPEARANCE (colors, lighting)
-# Tighten one group per epoch (epochs 15,17,19,21,23,25,27) to force focus
+# NEW: Latent group now has 4 sub-groups: KL, Structure, Capacity, Detail Stats
+# NEW: Capacity sub-group enforces active/effective dimension utilization
 import os, sys, time, copy
 import torch
 import torch.nn.functional as F
@@ -93,6 +94,8 @@ histories = {
     'loss': [], 'min_group': [], 'bottleneck': [], 'ssim': [], 'mse': [], 'edge': [],
     'kl_core_raw': [], 'kl_detail_raw': [],
     'logvar_core_raw': [], 'logvar_detail_raw': [],
+    'core_active_raw': [], 'detail_active_raw': [],
+    'core_effective_raw': [], 'detail_effective_raw': [],
     'detail_ratio_raw': [], 'core_var_raw': [], 'detail_var_raw': [],
     'core_var_max_raw': [], 'detail_var_max_raw': [], 'consistency_raw': [],
     'structure_loss': [], 'appearance_loss': [], 'color_hist_loss': [],
@@ -108,6 +111,8 @@ histories = {
     'core_color_leak': [], 'detail_edge_leak': [], 'traversal_goal': [],
     'kl_core_goal': [], 'kl_detail_goal': [],
     'cov_goal': [], 'weak': [], 'consistency_goal': [],
+    'core_active_goal': [], 'detail_active_goal': [],
+    'core_effective_goal': [], 'detail_effective_goal': [],
     'detail_mean_goal': [], 'detail_var_mean_goal': [], 'detail_cov_goal': [],
     'detail_ratio_goal': [], 'core_var_goal': [], 'detail_var_goal': [],
     'core_var_max_goal': [], 'detail_var_max_goal': [],
@@ -271,6 +276,7 @@ for epoch in range(1, EPOCHS + 1):
 
             # Updated raw values including leak detection and logvar tracking
             for k in ['kl_core_raw', 'kl_detail_raw', 'logvar_core_raw', 'logvar_detail_raw',
+                     'core_active_raw', 'detail_active_raw', 'core_effective_raw', 'detail_effective_raw',
                      'detail_ratio_raw', 'core_var_raw', 'detail_var_raw',
                      'core_var_max_raw', 'detail_var_max_raw', 'consistency_raw',
                      'detail_mean_raw', 'detail_var_mean_raw', 'detail_cov_raw',
@@ -303,6 +309,10 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['cov_goal'].append(ig['cov'])
             epoch_data['weak'].append(ig['weak'])
             epoch_data['consistency_goal'].append(ig.get('consistency', 0.5))
+            epoch_data['core_active_goal'].append(ig['core_active'])
+            epoch_data['detail_active_goal'].append(ig['detail_active'])
+            epoch_data['core_effective_goal'].append(ig['core_effective'])
+            epoch_data['detail_effective_goal'].append(ig['detail_effective'])
             epoch_data['detail_mean_goal'].append(ig['detail_mean'])
             epoch_data['detail_var_mean_goal'].append(ig['detail_var_mean'])
             epoch_data['detail_cov_goal'].append(ig['detail_cov'])

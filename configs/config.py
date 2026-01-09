@@ -10,12 +10,12 @@ if torch.cuda.is_available():
     torch.backends.cudnn.allow_tf32 = True
     torch.set_float32_matmul_precision('high')
 
-# A100 Optimizations
+# GPU Optimizations
 USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during backward pass
 
 # Training
 EPOCHS = 35
-BATCH_SIZE = 512  # A100: Increased from 256 (40GB can handle 512-1024)
+BATCH_SIZE = 256  # L4: 24GB VRAM (A100 used 512 with 40GB)
 LEARNING_RATE = 1e-3
 LEARNING_RATE_D = 1e-4  # Discriminator learning rate (slower)
 WEIGHT_DECAY = 1e-5
@@ -38,9 +38,7 @@ NUM_TRAVERSE_DIMS = 15
 
 USE_AUGMENTATION = True
 
-# A/B Testing: Softmin vs Hard Min
-USE_SOFTMIN = False  # True = softmin, False = hard min (SOFTMIN UNSTABLE - using hard min)
-SOFTMIN_TEMPERATURE = 0.1  # Lower = closer to hard min, higher = smoother
+# LBO Directive #1: Must use pure min() - softmin violates LBO by smoothing the barrier
 
 from enum import Enum
 

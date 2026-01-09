@@ -202,7 +202,7 @@ for epoch in range(1, EPOCHS + 1):
             goal_system.calibrate(epoch=epoch)
             needs_recal = False
 
-        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug, USE_SOFTMIN, SOFTMIN_TEMPERATURE)
+        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
 
         # BOM philosophy: Let it crash loudly if constraints violated, don't mask with reloads
         if result is None:
@@ -219,12 +219,31 @@ for epoch in range(1, EPOCHS + 1):
 
         loss.backward()
 
-        # BOM philosophy: No grad clipping - if gradients explode, the barrier is wrong
-        # if any(p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()) for p in model.parameters()):
-        #     skip_count += 1; optimizer.zero_grad(set_to_none=True); continue
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # LBO Directive #4: Discrete Rejection / Rollback Mechanism
+        # Save state before stepping - allows rollback if update violates constraints
+        state_before_step = {
+            'model': {k: v.clone() for k, v in model.state_dict().items()},
+            'optimizer': copy.deepcopy(optimizer.state_dict())
+        }
 
         optimizer.step()
+
+        # Look-ahead: Check if the update caused any group to violate constraints
+        with torch.no_grad():
+            recon_check, mu_check, logvar_check, z_check = model(x)
+            check_result = grouped_bom_loss(recon_check, x, mu_check, logvar_check, z_check, model,
+                                          goal_system, vgg, split_idx, GROUP_NAMES, discriminator,
+                                          x_aug)
+
+            # If update caused violation (S_min ≤ 0 or NaN), ROLLBACK
+            if check_result is None or torch.isnan(check_result['loss']) or torch.isinf(check_result['loss']):
+                # Restore state
+                model.load_state_dict(state_before_step['model'])
+                optimizer.load_state_dict(state_before_step['optimizer'])
+                skip_count += 1
+                optimizer.zero_grad(set_to_none=True)
+                print(f"[ROLLBACK] Epoch {epoch}, Batch {batch_idx}: Update violated constraints, state restored")
+                continue
         
         if batch_idx % 10 == 0:
             with torch.no_grad():

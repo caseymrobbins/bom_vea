@@ -89,7 +89,7 @@ print("v15: LBO Constitutional compliance with pure min() barrier")
 print("     - Directive #1: Pure -log(min(S_i)) - NO softmin, NO epsilon")
 print("     - Directive #3: No clamping on goals")
 print("     - Directive #4: Discrete rejection/rollback on S_min ≤ 0")
-print("     - Directive #6: Adaptive squeeze starting at plateau (epochs 5, 8, 11, 14, 17)")
+print("     - Directive #6: Natural adaptive squeeze (infinite gradient pushes all groups → 1.0)")
 print("     - Behavioral disentanglement (core→structure, detail→appearance)")
 print("=" * 100 + "\n")
 
@@ -106,52 +106,11 @@ for epoch in range(1, EPOCHS + 1):
     skip_count = 0
     all_mu_core, all_mu_detail = [], []
     
-    needs_recal = epoch in RECALIBRATION_EPOCHS or epoch == 1
-    if needs_recal:
-        # Progressive tightening: one group at a time
-        if epoch in TIGHTENING_SCHEDULE:
-            target_group = TIGHTENING_SCHEDULE[epoch]
-            print(f"\n🔧 Epoch {epoch}: TIGHTENING '{target_group.upper()}' GROUP...")
-
-            if target_group == 'latent':
-                # Add upper bounds to KL: LOWER(1.0) → BOX_ASYMMETRIC[50, 5000]
-                GOAL_SPECS['kl_core'] = {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 5000, 'healthy': 1000}
-                GOAL_SPECS['kl_detail'] = {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50, 'upper': 5000, 'healthy': 1000}
-                # Tighten detail contracts: [-15, 15] → [-3, 3], [0.01, 350] → [0.1, 50]
-                GOAL_SPECS['detail_mean']['lower'] = -3.0
-                GOAL_SPECS['detail_mean']['upper'] = 3.0
-                GOAL_SPECS['detail_var_mean']['lower'] = 0.1
-                GOAL_SPECS['detail_var_mean']['upper'] = 50.0
-                print(f"    KL: LOWER(1.0) → BOX_ASYMMETRIC[50, 5000] healthy=1000")
-                print(f"    detail_mean: [-3, 3]")
-                print(f"    detail_var_mean: [0.1, 50]")
-
-            elif target_group == 'health':
-                # Tighten health constraints: [0.0, 0.70] → [0.05, 0.50], [0.0, 300] → [0.1, 50]
-                GOAL_SPECS['detail_ratio']['lower'] = 0.05
-                GOAL_SPECS['detail_ratio']['upper'] = 0.50
-                GOAL_SPECS['detail_var_mean']['lower'] = 0.1
-                GOAL_SPECS['detail_var_mean']['upper'] = 50.0
-                GOAL_SPECS['core_var_health']['lower'] = 0.1
-                GOAL_SPECS['core_var_health']['upper'] = 50.0
-                GOAL_SPECS['detail_var_health']['lower'] = 0.1
-                GOAL_SPECS['detail_var_health']['upper'] = 50.0
-                print(f"    detail_ratio: [0.05, 0.50]")
-                print(f"    detail_var_mean: [0.1, 50]")
-                print(f"    variance health: [0.1, 50]")
-
-            elif target_group in ['recon', 'core', 'swap', 'realism', 'disentangle']:
-                # These groups use MINIMIZE_SOFT with auto-scale
-                # Tightening means recalibrating to current performance
-                # This forces BOM to improve beyond current baseline
-                print(f"    Recalibrating MINIMIZE_SOFT goals in {target_group} group")
-                print(f"    (BOM will focus gradient here for 1-2 epochs)")
-
-            # Reinitialize goal system with tightened specs
-            goal_system = GoalSystem(GOAL_SPECS)
-
+    # LBO Directive #6: Natural adaptive squeeze - no manual recalibration
+    # Only calibrate scales at epoch 1, then let LBO's infinite gradient do the work
+    if epoch == 1:
         goal_system.start_recalibration()
-        print(f"\n📊 Epoch {epoch}: Calibrating {TIGHTENING_SCHEDULE.get(epoch, 'all groups')}...")
+        print(f"\n📊 Epoch 1: Initial calibration of all goal scales...")
 
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")

@@ -84,17 +84,16 @@ histories = {
 dim_variance_history = {'core': [], 'detail': []}
 
 print("\n" + "=" * 100)
-print(f"BOM VAE v14 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
-print("v14: Behavioral disentanglement walls (intervention testing)")
-print("     - Direct leak detection (core→color, detail→edge)")
-print("     - Traversal meaning goal (core→edges, detail→color)")
-print("     - PatchGAN discriminator with spectral norm")
-print("     - KL divergence for BOTH core and detail channels")
-print("     - No clamps, fail-fast on barrier violations")
-print(f"\nBOM: {'SOFTMIN' if USE_SOFTMIN else 'HARD MIN'} barrier (softmin disabled - unstable)")
+print(f"BOM VAE v15 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
+print("v15: LBO Constitutional compliance with pure min() barrier")
+print("     - Directive #1: Pure -log(min(S_i)) - NO softmin, NO epsilon")
+print("     - Directive #3: No clamping on goals")
+print("     - Directive #4: Discrete rejection/rollback on S_min ≤ 0")
+print("     - Progressive group tightening (epochs 15, 18, 21, 24, 27)")
+print("     - Behavioral disentanglement (core→structure, detail→appearance)")
 print("=" * 100 + "\n")
 
-# BOM: No "last good state" safety net - let barrier violations crash loudly
+# LBO: Rollback mechanism for discrete rejection
 # last_good_state = copy.deepcopy(model.state_dict())
 # last_good_state_d = copy.deepcopy(discriminator.state_dict())
 # last_good_optimizer = copy.deepcopy(optimizer.state_dict())

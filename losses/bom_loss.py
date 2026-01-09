@@ -267,11 +267,8 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         d_recon_logits = discriminator(recon)
         d_swap_logits = discriminator(r_sw)
 
-        # Clamp logits to prevent numerical explosion in sigmoid (safety rail, not anti-BOM)
-        # sigmoid(50) ≈ 1.0 and sigmoid(-50) ≈ 0.0, so clamping doesn't change behavior
-        d_recon_logits = torch.clamp(d_recon_logits, -50, 50)
-        d_swap_logits = torch.clamp(d_swap_logits, -50, 50)
-
+        # LBO Directive #3: No clamping on raw outputs
+        # If discriminator produces extreme logits causing NaN, Directive #4 rollback will handle it
         # Want D scores HIGH (realistic), so minimize (1 - sigmoid(D))
         realism_loss_recon = 1.0 - torch.sigmoid(d_recon_logits).mean()
         realism_loss_swap = 1.0 - torch.sigmoid(d_swap_logits).mean()
@@ -368,15 +365,13 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     g_detail_var_max = goals.goal(detail_var_max, 'detail_var_max')
 
     # GROUPED BOM - v15: Added disentanglement group (behavioral walls)
+    # LBO Directive #3: No clamping - all groups must be allowed to reach their natural values
+    # If any group → 0, the system WILL crash, triggering Directive #4 rollback
     group_recon = geometric_mean([g_pixel, g_edge, g_perceptual])
     group_core = geometric_mean([g_core_mse, g_core_edge])
     group_swap = geometric_mean([g_swap_structure, g_swap_appearance, g_swap_color_hist])
-    # Realism: Add epsilon to prevent crash when discriminator gets too confident (logits → ±50)
-    group_realism = geometric_mean([torch.clamp(g_realism_recon, min=1e-8),
-                                    torch.clamp(g_realism_swap, min=1e-8)])
-    # Disentangle: Add epsilon to prevent crash when leak=0 at init (collapsed encoder)
-    group_disentangle = geometric_mean([torch.clamp(g_core_color_leak, min=1e-8),
-                                        torch.clamp(g_detail_edge_leak, min=1e-8)])
+    group_realism = geometric_mean([g_realism_recon, g_realism_swap])
+    group_disentangle = geometric_mean([g_core_color_leak, g_detail_edge_leak])
     group_latent = geometric_mean([g_kl_core, g_kl_detail, g_logvar_core, g_logvar_detail, g_cov, g_weak, g_consistency, g_detail_mean, g_detail_var_mean, g_detail_cov])
     group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var, g_core_var_max, g_detail_var_max])
 

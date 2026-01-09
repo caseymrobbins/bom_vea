@@ -103,18 +103,11 @@ GOAL_SPECS = {
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
 }
 
-# Progressive tightening: one group per epoch, spaced 3 epochs apart
-# BOM will focus on each group for 2-3 epochs as it becomes the bottleneck
-# NOTE: Only tighten MINIMIZE_SOFT groups (recalibrate to current performance)
-#       BOX constraints (latent, health) can't be safely tightened mid-training
-# Epochs 31-35: No tightening - stable convergence for all groups (especially latent)
-TIGHTENING_SCHEDULE = {
-    15: 'recon',      # Epoch 15: tighten reconstruction
-    18: 'core',       # Epoch 18: tighten core structure
-    21: 'swap',       # Epoch 21: tighten swap goals
-    24: 'realism',    # Epoch 24: tighten discriminator goals
-    27: 'disentangle',# Epoch 27: tighten behavioral walls
-}
+# LBO Directive #6: Adaptive Squeeze with rollback monitoring
+# After epoch 4 (plateau), tighten ALL constraints slightly each epoch
+# Stop tightening when rollback rate hits 5%+ (system at limit)
+ADAPTIVE_TIGHTENING_START = 5  # Start tightening after epoch 4
+ADAPTIVE_TIGHTENING_RATE = 0.95  # Multiply scales/bounds by this each epoch (5% tighter)
+ROLLBACK_THRESHOLD = 0.05  # Stop tightening when rollback rate hits 5%
 
-RECALIBRATION_EPOCHS = list(TIGHTENING_SCHEDULE.keys())  # [15, 18, 21, 24, 27]
 GROUP_NAMES = ['recon', 'core', 'swap', 'realism', 'disentangle', 'latent', 'health']

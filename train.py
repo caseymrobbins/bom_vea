@@ -201,7 +201,7 @@ for epoch in range(1, EPOCHS + 1):
             goal_system.calibrate(epoch=epoch)
             needs_recal = False
 
-        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug, USE_SOFTMIN, SOFTMIN_TEMPERATURE)
+        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
 
         # BOM philosophy: Let it crash loudly if constraints violated, don't mask with reloads
         if result is None:
@@ -232,7 +232,7 @@ for epoch in range(1, EPOCHS + 1):
             recon_check, mu_check, logvar_check, z_check = model(x)
             check_result = grouped_bom_loss(recon_check, x, mu_check, logvar_check, z_check, model,
                                           goal_system, vgg, split_idx, GROUP_NAMES, discriminator,
-                                          x_aug, USE_SOFTMIN, SOFTMIN_TEMPERATURE)
+                                          x_aug)
 
             # If update caused violation (S_min ≤ 0 or NaN), ROLLBACK
             if check_result is None or torch.isnan(check_result['loss']) or torch.isinf(check_result['loss']):

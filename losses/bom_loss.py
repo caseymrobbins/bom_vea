@@ -1,21 +1,11 @@
 # losses/bom_loss.py
-# v15: Tightened constraints + Softmin A/B test
+# v15: LBO-compliant with pure min() barrier
 # Based on v14: Discriminator + Detail contracts
 # r_sw should have: x1's STRUCTURE + x2's APPEARANCE
 
 import torch
 import torch.nn.functional as F
 from losses.goals import geometric_mean
-
-def softmin(x, temperature=0.1):
-    """Smooth approximation of min using LogSumExp trick.
-
-    softmin(x, T) = -T * log(sum(exp(-x / T)))
-
-    As T → 0, this approaches hard min(x).
-    As T → ∞, this approaches mean(x).
-    """
-    return -temperature * torch.logsumexp(-x / temperature, dim=0)
 
 _sobel_x, _sobel_y = None, None
 
@@ -205,8 +195,8 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
 
     return losses
 
-def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None, use_softmin=False, softmin_temperature=0.1):
-    """Compute BOM loss with grouped goals. v15: Adds softmin option, includes v14 discriminator + detail contracts."""
+def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None):
+    """Compute LBO loss with grouped goals. Pure min() barrier (no softmin - violates LBO)."""
     if not all([check_tensor(t) for t in [recon, x, mu, logvar, z]]):
         return None
 
@@ -378,20 +368,16 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_disentangle, group_latent, group_health])
     if torch.isnan(groups).any() or torch.isinf(groups).any(): return None
 
-    if use_softmin:
-        # Softmin: smooth approximation of min (UNSTABLE - disabled in config)
-        min_group = softmin(groups, softmin_temperature)
-        min_group_idx = groups.argmin()  # Still track which group is weakest
-    else:
-        # Hard min: original BOM barrier (ACTIVE)
-        min_group = groups.min()
-        min_group_idx = groups.argmin()
+    # LBO Directive #1: Pure min() barrier (no softmin - violates LBO)
+    min_group = groups.min()
+    min_group_idx = groups.argmin()
 
     # LBO Directive #4: Reject S_min ≤ 0 BEFORE log calculation to prevent crash
     if min_group <= 0:
         return None  # Trigger rollback - constraint violated
 
-    loss = -torch.log(min_group)  # Pure log barrier, NO EPSILON!
+    # LBO Directive #1: Pure log barrier, NO EPSILON!
+    loss = -torch.log(min_group)
     if torch.isnan(loss): return None
 
     individual_goals = {

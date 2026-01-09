@@ -38,9 +38,7 @@ NUM_TRAVERSE_DIMS = 15
 
 USE_AUGMENTATION = True
 
-# A/B Testing: Softmin vs Hard Min
-USE_SOFTMIN = False  # True = softmin, False = hard min (SOFTMIN UNSTABLE - using hard min)
-SOFTMIN_TEMPERATURE = 0.1  # Lower = closer to hard min, higher = smoother
+# LBO Directive #1: Must use pure min() - softmin violates LBO by smoothing the barrier
 
 from enum import Enum
 

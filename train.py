@@ -89,7 +89,8 @@ print("v15: LBO Constitutional compliance with pure min() barrier")
 print("     - Directive #1: Pure -log(min(S_i)) - NO softmin, NO epsilon")
 print("     - Directive #3: No clamping on goals")
 print("     - Directive #4: Discrete rejection/rollback on S_min ≤ 0")
-print(f"     - Directive #6: Adaptive squeeze (tighten {(1-ADAPTIVE_TIGHTENING_RATE)*100:.0f}%/epoch after epoch {ADAPTIVE_TIGHTENING_START-1} until rollback rate hits {ROLLBACK_THRESHOLD*100:.0f}%)")
+print(f"     - Directive #6: Adaptive squeeze with backoff (start 5%, back off to 4%/3%/2%/1% if >50% rollbacks)")
+print(f"     - Target: {ROLLBACK_THRESHOLD_TARGET*100:.0f}% rollback rate, then +1 epoch and stop")
 print("     - Behavioral disentanglement (core→structure, detail→appearance)")
 print("=" * 100 + "\n")
 
@@ -101,6 +102,7 @@ print("=" * 100 + "\n")
 
 # Adaptive tightening termination: track when threshold is hit
 threshold_hit_epoch = None
+tightening_rate_idx = 0  # Start with most aggressive (5%)
 
 for epoch in range(1, EPOCHS + 1):
     t0 = time.time()
@@ -312,12 +314,22 @@ for epoch in range(1, EPOCHS + 1):
     total_batches = sum(bn_counts.values())
     bn_pcts = {n: (bn_counts.get(n, 0) / total_batches * 100) if total_batches > 0 else 0 for n in GROUP_NAMES}
 
-    # Adaptive tightening: monitor rollback rate and tighten if below threshold
+    # Adaptive tightening with progressive backoff
     rollback_rate = skip_count / total_batches if total_batches > 0 else 0
-    should_tighten = epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate < ROLLBACK_THRESHOLD
 
-    # Track when we first hit the threshold
-    if epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate >= ROLLBACK_THRESHOLD and threshold_hit_epoch is None:
+    # Check if last tightening was too aggressive (>50% rollbacks)
+    if epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate > ROLLBACK_THRESHOLD_MAX:
+        if tightening_rate_idx < len(ADAPTIVE_TIGHTENING_RATES) - 1:
+            tightening_rate_idx += 1
+            tightening_pct = int((1 - ADAPTIVE_TIGHTENING_RATES[tightening_rate_idx]) * 100)
+            print(f"\n⚠️  Rollback rate too high ({rollback_rate*100:.0f}%), backing off to {tightening_pct}% tightening")
+
+    # Decide if we should tighten this epoch
+    current_rate = ADAPTIVE_TIGHTENING_RATES[tightening_rate_idx]
+    should_tighten = epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate < ROLLBACK_THRESHOLD_TARGET
+
+    # Track when we first hit the target threshold
+    if epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate >= ROLLBACK_THRESHOLD_TARGET and threshold_hit_epoch is None:
         threshold_hit_epoch = epoch
 
     print(f"\nEpoch {epoch:2d} | Loss: {histories['loss'][-1]:.3f} | Min: {histories['min_group'][-1]:.3f} | SSIM: {histories['ssim'][-1]:.3f}")
@@ -328,18 +340,19 @@ for epoch in range(1, EPOCHS + 1):
     print(f"         Rollbacks: {skip_count}/{total_batches} ({rollback_rate*100:.1f}%)", end="")
 
     if should_tighten:
-        print(f" → 🔧 TIGHTENING constraints ({rollback_rate*100:.1f}% < {ROLLBACK_THRESHOLD*100:.0f}%)")
+        tightening_pct = int((1 - current_rate) * 100)
+        print(f" → 🔧 TIGHTENING {tightening_pct}% (rate < {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")
         # Tighten MINIMIZE_SOFT scales (makes goals harder to achieve)
         for name, spec in GOAL_SPECS.items():
             if spec['type'] == ConstraintType.MINIMIZE_SOFT and isinstance(spec.get('scale'), (int, float)):
-                spec['scale'] *= ADAPTIVE_TIGHTENING_RATE
+                spec['scale'] *= current_rate
         # Tighten BOX constraints (narrow bounds toward center)
         for name, spec in GOAL_SPECS.items():
             if spec['type'] in [ConstraintType.BOX, ConstraintType.BOX_ASYMMETRIC]:
                 if 'lower' in spec and 'upper' in spec:
                     center = (spec['lower'] + spec['upper']) / 2
                     range_half = (spec['upper'] - spec['lower']) / 2
-                    new_range_half = range_half * ADAPTIVE_TIGHTENING_RATE
+                    new_range_half = range_half * current_rate
                     spec['lower'] = center - new_range_half
                     spec['upper'] = center + new_range_half
         # Reinitialize goal system with tightened specs
@@ -347,7 +360,7 @@ for epoch in range(1, EPOCHS + 1):
         # Don't recalibrate - keep current scales for MINIMIZE_SOFT with auto
     else:
         if epoch >= ADAPTIVE_TIGHTENING_START:
-            print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD*100:.0f}%)")
+            print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")
         else:
             print()
 

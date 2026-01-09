@@ -105,9 +105,10 @@ GOAL_SPECS = {
 
 # LBO Directive #6: Adaptive Squeeze with rollback monitoring
 # After epoch 4 (plateau), tighten ALL constraints slightly each epoch
-# Stop tightening when rollback rate hits 5%+ (system at limit)
+# If too many rollbacks, back off progressively: 5% -> 4% -> 3% -> 2% -> 1%
 ADAPTIVE_TIGHTENING_START = 5  # Start tightening after epoch 4
-ADAPTIVE_TIGHTENING_RATE = 0.95  # Multiply scales/bounds by this each epoch (5% tighter)
-ROLLBACK_THRESHOLD = 0.05  # Stop tightening when rollback rate hits 5%
+ADAPTIVE_TIGHTENING_RATES = [0.95, 0.96, 0.97, 0.98, 0.99]  # Try these rates in order (5%, 4%, 3%, 2%, 1% tightening)
+ROLLBACK_THRESHOLD_MAX = 0.50  # If rollback rate > 50%, tightening was too aggressive - back off
+ROLLBACK_THRESHOLD_TARGET = 0.05  # Target: 5% rollback rate (optimal squeeze)
 
 GROUP_NAMES = ['recon', 'core', 'swap', 'realism', 'disentangle', 'latent', 'health']

@@ -53,34 +53,43 @@ import torchvision.transforms as T
 def diagnose_rollback(check_result, group_names):
     """Provide detailed diagnostic information about why a rollback occurred."""
     if check_result is None:
-        return "Complete constraint violation (S_min ≤ 0 or tensor check failed)"
+        return "S_min ≤ 0 | Complete constraint violation"
+
+    # FRONT-LOAD critical info: show min group score FIRST
+    gv = check_result.get('group_values', {})
+    if gv:
+        min_group_name = group_names[check_result['min_idx'].item()]
+        min_group_score = gv[min_group_name]
+        prefix = f"min_group={min_group_score:.4f} ({min_group_name})"
+    else:
+        prefix = "Unknown group"
 
     diag = []
 
     # Check for NaN/Inf loss
     if torch.isnan(check_result['loss']):
-        diag.append("Loss is NaN")
+        diag.append("Loss=NaN")
     if torch.isinf(check_result['loss']):
-        diag.append("Loss is Inf")
+        diag.append("Loss=Inf")
 
-    # Analyze individual goals - find problematic ones (≤ 0.01 = danger zone)
+    # Show top 3 failing individual goals (≤ 0.01 = danger zone)
     ig = check_result.get('individual_goals', {})
     failing_goals = {name: val for name, val in ig.items() if val <= 0.01}
     if failing_goals:
-        diag.append(f"Failing goals (≤0.01): {', '.join(f'{k}={v:.4f}' for k, v in sorted(failing_goals.items(), key=lambda x: x[1])[:5])}")
+        top_failing = sorted(failing_goals.items(), key=lambda x: x[1])[:3]
+        diag.append(f"Failing: {', '.join(f'{k}={v:.4f}' for k, v in top_failing)}")
 
-    # Show group values
-    gv = check_result.get('group_values', {})
+    # Show all groups in danger zone (≤ 0.05)
     if gv:
-        min_group_name = group_names[check_result['min_idx'].item()]
-        diag.append(f"Bottleneck: {min_group_name}={gv[min_group_name]:.4f}")
-
-        # Show all groups that are in danger zone (≤ 0.05)
         danger_groups = {name: val for name, val in gv.items() if val <= 0.05}
         if danger_groups:
-            diag.append(f"Danger groups (≤0.05): {', '.join(f'{k}={v:.4f}' for k, v in sorted(danger_groups.items(), key=lambda x: x[1]))}")
+            diag.append(f"Danger: {', '.join(f'{k}={v:.4f}' for k, v in sorted(danger_groups.items(), key=lambda x: x[1]))}")
 
-    return " | ".join(diag) if diag else "Unknown constraint violation"
+    # Combine: "[min_group info] | [details]"
+    if diag:
+        return f"{prefix} | {' | '.join(diag)}"
+    else:
+        return prefix
 
 aug_transform = torch.nn.Sequential(
     T.RandomHorizontalFlip(p=0.5),
@@ -156,6 +165,10 @@ for epoch in range(1, EPOCHS + 1):
         goal_system.start_recalibration()
         needs_recal = True
         print(f"\n📊 Epoch 1: Initial calibration of all goal scales...")
+
+    # Remove epoch 1 safety margin at start of epoch 2
+    if epoch == 2 and goal_system.epoch1_margin_applied:
+        goal_system.remove_epoch1_margin()
 
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")

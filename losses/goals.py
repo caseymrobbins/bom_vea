@@ -59,6 +59,7 @@ class GoalSystem:
         self.samples = {name: [] for name in goal_specs.keys()}
         self.calibrated = False
         self.calibration_count = 0
+        self.epoch1_margin_applied = False  # Track if 10% safety margin is active
     
     def collect(self, loss_dict: Dict[str, float]):
         for name, value in loss_dict.items():
@@ -74,6 +75,9 @@ class GoalSystem:
         # Verify BOX constraints contain initial values
         box_violations = []
 
+        # EPOCH 1 SAFETY MARGIN: Apply 10% wider scales during first epoch
+        epoch1_margin = 1.10 if epoch == 1 else 1.0
+
         for name, spec in self.specs.items():
             ctype = spec['type']
             if ctype == ConstraintType.MINIMIZE_SOFT and spec.get('scale') == 'auto':
@@ -88,12 +92,18 @@ class GoalSystem:
                         self.scales[name] = max(max_val, 0.001)
                     else:
                         self.scales[name] = max(median, 0.001)
+
+                    # Apply epoch 1 safety margin
+                    self.scales[name] *= epoch1_margin
+
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
-                    print(f"  {name:20s}: scale={self.scales[name]:.4f} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
+                    margin_note = " (+10% margin)" if epoch == 1 else ""
+                    print(f"  {name:20s}: scale={self.scales[name]:.4f}{margin_note} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
                 else:
-                    self.scales[name] = 1.0
-                    self.normalizers[name] = make_normalizer_torch(ctype, scale=1.0)
-                    print(f"  {name:20s}: scale=1.0 (no samples)")
+                    self.scales[name] = 1.0 * epoch1_margin
+                    self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
+                    margin_note = " (+10% margin)" if epoch == 1 else ""
+                    print(f"  {name:20s}: scale={self.scales[name]:.4f}{margin_note} (no samples)")
             elif ctype == ConstraintType.MINIMIZE_SOFT:
                 self.scales[name] = spec['scale']
                 self.normalizers[name] = make_normalizer_torch(ctype, scale=spec['scale'])
@@ -148,6 +158,12 @@ class GoalSystem:
             print("    These constraints will return goal=0 → loss=inf → crash!")
             print("    ACTION: Widen BOX bounds to contain initialization values.\n")
 
+        # Track if margin was applied
+        if epoch == 1:
+            self.epoch1_margin_applied = True
+            print("\n⚠️  EPOCH 1 SAFETY MARGIN: All auto-scaled goals widened by 10%")
+            print("    Will be removed at start of Epoch 2 to tighten constraints\n")
+
         print("=" * 60 + "\n")
         self.calibrated = True
         self.samples = {name: [] for name in self.specs.keys()}
@@ -175,6 +191,30 @@ class GoalSystem:
                 self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
             else:
                 self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
+
+    def remove_epoch1_margin(self):
+        """Remove the 10% safety margin applied during epoch 1 calibration"""
+        if not self.epoch1_margin_applied:
+            print("⚠️  No epoch 1 margin to remove (was not applied)")
+            return
+
+        print("\n" + "=" * 60)
+        print("🔧 REMOVING EPOCH 1 SAFETY MARGIN")
+        print("=" * 60)
+        print("Tightening auto-scaled goals from calibrated+10% → calibrated values\n")
+
+        for name, spec in self.specs.items():
+            if spec['type'] == ConstraintType.MINIMIZE_SOFT and spec.get('scale') == 'auto':
+                old_scale = self.scales[name]
+                self.scales[name] /= 1.10  # Remove 10% margin
+                print(f"  {name:20s}: {old_scale:.4f} → {self.scales[name]:.4f} (-9.1%)")
+
+        # Rebuild normalizers with tightened scales
+        self.rebuild_normalizers()
+        self.epoch1_margin_applied = False
+
+        print("\n✅ All auto-scaled constraints tightened to calibrated values")
+        print("=" * 60 + "\n")
 
 def geometric_mean(goals):
     """Geometric mean - crashes on exact zero (fail-fast BOM)"""

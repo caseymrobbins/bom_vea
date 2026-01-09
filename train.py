@@ -49,6 +49,38 @@ split_idx = LATENT_DIM // 2
 # Augmentation for consistency loss - batched on GPU
 import torchvision.transforms as T
 
+def diagnose_rollback(check_result, group_names):
+    """Provide detailed diagnostic information about why a rollback occurred."""
+    if check_result is None:
+        return "Complete constraint violation (S_min ≤ 0 or tensor check failed)"
+
+    diag = []
+
+    # Check for NaN/Inf loss
+    if torch.isnan(check_result['loss']):
+        diag.append("Loss is NaN")
+    if torch.isinf(check_result['loss']):
+        diag.append("Loss is Inf")
+
+    # Analyze individual goals - find problematic ones (≤ 0.01 = danger zone)
+    ig = check_result.get('individual_goals', {})
+    failing_goals = {name: val for name, val in ig.items() if val <= 0.01}
+    if failing_goals:
+        diag.append(f"Failing goals (≤0.01): {', '.join(f'{k}={v:.4f}' for k, v in sorted(failing_goals.items(), key=lambda x: x[1])[:5])}")
+
+    # Show group values
+    gv = check_result.get('group_values', {})
+    if gv:
+        min_group_name = group_names[check_result['min_idx'].item()]
+        diag.append(f"Bottleneck: {min_group_name}={gv[min_group_name]:.4f}")
+
+        # Show all groups that are in danger zone (≤ 0.05)
+        danger_groups = {name: val for name, val in gv.items() if val <= 0.05}
+        if danger_groups:
+            diag.append(f"Danger groups (≤0.05): {', '.join(f'{k}={v:.4f}' for k, v in sorted(danger_groups.items(), key=lambda x: x[1]))}")
+
+    return " | ".join(diag) if diag else "Unknown constraint violation"
+
 aug_transform = torch.nn.Sequential(
     T.RandomHorizontalFlip(p=0.5),
     T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
@@ -208,7 +240,10 @@ for epoch in range(1, EPOCHS + 1):
                 optimizer.load_state_dict(state_before_step['optimizer'])
                 skip_count += 1
                 optimizer.zero_grad(set_to_none=True)
-                print(f"[ROLLBACK] Epoch {epoch}, Batch {batch_idx}: Update violated constraints, state restored")
+
+                # Detailed diagnostic of what failed
+                diagnostic = diagnose_rollback(check_result, GROUP_NAMES)
+                print(f"[ROLLBACK] Epoch {epoch}, Batch {batch_idx}: {diagnostic}")
                 continue
         
         if batch_idx % 10 == 0:

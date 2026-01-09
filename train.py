@@ -89,7 +89,7 @@ print("v15: LBO Constitutional compliance with pure min() barrier")
 print("     - Directive #1: Pure -log(min(S_i)) - NO softmin, NO epsilon")
 print("     - Directive #3: No clamping on goals")
 print("     - Directive #4: Discrete rejection/rollback on S_min ≤ 0")
-print("     - Progressive group tightening (epochs 15, 18, 21, 24, 27)")
+print("     - Directive #6: Adaptive squeeze starting at plateau (epochs 5, 8, 11, 14, 17)")
 print("     - Behavioral disentanglement (core→structure, detail→appearance)")
 print("=" * 100 + "\n")
 

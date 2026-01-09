@@ -160,6 +160,22 @@ class GoalSystem:
     def start_recalibration(self):
         self.samples = {name: [] for name in self.specs.keys()}
 
+    def rebuild_normalizers(self):
+        """Rebuild normalizers from current specs (used after tightening)"""
+        for name, spec in self.specs.items():
+            ctype = spec['type']
+            if ctype == ConstraintType.MINIMIZE_SOFT:
+                scale = self.scales.get(name, spec.get('scale', 1.0))
+                self.normalizers[name] = make_normalizer_torch(ctype, scale=scale)
+            elif ctype == ConstraintType.BOX:
+                self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'])
+            elif ctype == ConstraintType.BOX_ASYMMETRIC:
+                self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'], healthy=spec['healthy'])
+            elif ctype == ConstraintType.LOWER:
+                self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
+            else:
+                self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
+
 def geometric_mean(goals):
     """Geometric mean - crashes on exact zero (fail-fast BOM)"""
     goals = torch.stack(goals)

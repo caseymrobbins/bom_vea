@@ -324,7 +324,8 @@ for epoch in range(1, EPOCHS + 1):
         # Restore the constraints from before tightening
         for name in GOAL_SPECS:
             GOAL_SPECS[name] = copy.deepcopy(previous_goal_specs[name])
-        goal_system = GoalSystem(GOAL_SPECS)
+        goal_system.specs = GOAL_SPECS
+        goal_system.rebuild_normalizers()
 
         # Back off to gentler tightening rate
         if tightening_rate_idx < len(ADAPTIVE_TIGHTENING_RATES) - 1:
@@ -372,9 +373,9 @@ for epoch in range(1, EPOCHS + 1):
                     spec['lower'] = center - new_range_half
                     spec['upper'] = center + new_range_half
 
-        # Reinitialize goal system with tightened specs
-        goal_system = GoalSystem(GOAL_SPECS)
-        # Don't recalibrate - keep current scales for MINIMIZE_SOFT with auto
+        # Update goal_system with tightened specs (rebuild normalizers, keep scales)
+        goal_system.specs = GOAL_SPECS
+        goal_system.rebuild_normalizers()
     else:
         if epoch >= ADAPTIVE_TIGHTENING_START:
             print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")

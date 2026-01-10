@@ -76,13 +76,13 @@ GOAL_SPECS = {
     'detail_edge_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # Δz_detail shouldn't change edges
 
     # Latent group - KL and statistical health
-    # v16 FIX: Add upper bounds to prevent posterior collapse (KL explosion)
-    # BOX_ASYMMETRIC: Strong penalty below 'lower', soft penalty above 'upper', target 'healthy'
-    # Observed init: KL_core~17k, KL_detail~18k nats (ultra-conservative encoder init)
-    # Upper bound MUST contain initialization! Set to 25k (40% margin above 18k)
-    # Healthy target: 3000 nats (~47 nats/dim for 64 dims - will tighten during training)
-    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 25000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
-    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 25000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
+    # v16 STRATEGY: Let KL self-regulate during epoch 1 (naturally drops 60k → 10k by epoch 2)
+    # LOWER bounds only: Prevent ignoring latent space, but no upper bound for epoch 1
+    # Observed: KL starts 60k-65k (high LR), but naturally descends rapidly without constraint
+    # Capacity constraints (scale=0.3 below) prevent "collapse to single point" mode
+    # If posterior collapse appears later, add upper bounds starting epoch 2+
+    'kl_core': {'type': ConstraintType.LOWER, 'margin': 100.0},
+    'kl_detail': {'type': ConstraintType.LOWER, 'margin': 100.0},
 
     # Direct logvar constraints to prevent exp(logvar) explosion
     # logvar∈[-15,10] → std∈[0.0003, 148] → prevents numerical overflow

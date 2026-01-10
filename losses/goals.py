@@ -42,7 +42,7 @@ def make_normalizer_torch(ctype: ConstraintType, **kwargs) -> Callable:
         return soft_asymmetric_box
     
     if ctype == ConstraintType.MINIMIZE_SOFT:
-        scale = max(kwargs["scale"], 1e-6)  # Enforce minimum scale to prevent numerical instability
+        scale = max(kwargs["scale"], 5e-4)  # Enforce minimum scale to prevent numerical instability
         return lambda x: torch.exp(-torch.clamp(x, min=0.0) / scale)
     
     if ctype == ConstraintType.MINIMIZE_HARD:
@@ -87,11 +87,11 @@ class GoalSystem:
                     max_val = np.max(self.samples[name])
                     mean_val = np.mean(self.samples[name])
                     # Use max if median is near zero (prevents over-sensitivity)
-                    # Minimum scale 1e-3 to prevent numerical instability
+                    # Minimum scale 5e-4 to prevent numerical instability
                     if median < 1e-4:
-                        self.scales[name] = max(max_val, 1e-3)
+                        self.scales[name] = max(max_val, 5e-4)
                     else:
-                        self.scales[name] = max(median, 1e-3)
+                        self.scales[name] = max(median, 5e-4)
 
                     # Apply epoch 1 safety margin
                     self.scales[name] *= epoch1_margin

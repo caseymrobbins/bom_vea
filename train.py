@@ -264,17 +264,7 @@ for epoch in range(1, EPOCHS + 1):
         if needs_recal and batch_idx == CALIBRATION_BATCHES:
             goal_system.calibrate(epoch=epoch)
             needs_recal = False
-
-            # CRITICAL FIX: Reset BatchNorm running statistics after calibration
-            # During calibration we use simple MSE loss which can corrupt BN stats
-            # This prevents NaN in the first LBO forward pass
-            print(f"\n🔧 Resetting BatchNorm running statistics after calibration...")
-            for module in model.modules():
-                if isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
-                    module.reset_running_stats()
-            print(f"✓ BatchNorm reset complete")
-            print(f"⏭️  Skipping batch {batch_idx} to warm up BN stats with fresh forward pass\n")
-            continue  # Skip this batch, let BN warm up on next batch
+            # Note: Removed BN reset - calibration stats should be fine for LBO training
 
         result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
 

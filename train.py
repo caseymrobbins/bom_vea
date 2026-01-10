@@ -183,7 +183,7 @@ for epoch in range(1, EPOCHS + 1):
             GOAL_SPECS['kl_detail']['upper'] = new_upper
             # Re-initialize goal system normalizers with new bounds
             goal_system.goal_specs = GOAL_SPECS
-            goal_system.initialize_normalizers()
+            goal_system.rebuild_normalizers()
             print(f"🔽 KL ceiling squeezed to {new_upper:,} nats (epoch {epoch})")
 
     model.train()
@@ -264,6 +264,15 @@ for epoch in range(1, EPOCHS + 1):
         if needs_recal and batch_idx == CALIBRATION_BATCHES:
             goal_system.calibrate(epoch=epoch)
             needs_recal = False
+
+            # CRITICAL FIX: Reset BatchNorm running statistics after calibration
+            # During calibration we use simple MSE loss which can corrupt BN stats
+            # This prevents NaN in the first LBO forward pass
+            print(f"\n🔧 Resetting BatchNorm running statistics after calibration...")
+            for module in model.modules():
+                if isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
+                    module.reset_running_stats()
+            print(f"✓ BatchNorm reset complete\n")
 
         result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
 

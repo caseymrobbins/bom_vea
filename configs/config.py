@@ -17,8 +17,8 @@ USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during ba
 # Training
 EPOCHS = 25  # v16: Reduced from 35 (expect stable training to epoch 20+)
 BATCH_SIZE = 512  # A100: 40GB VRAM (L4 used 256 with 24GB)
-LEARNING_RATE = 1e-3
-LEARNING_RATE_D = 1e-4  # Discriminator learning rate (slower)
+LEARNING_RATE = 5e-4  # v16: Reduced from 1e-3 for more stable constraint satisfaction
+LEARNING_RATE_D = 5e-5  # Discriminator learning rate (10x slower than main, was 1e-4)
 WEIGHT_DECAY = 1e-5
 CALIBRATION_BATCHES = 200
 
@@ -76,10 +76,11 @@ GOAL_SPECS = {
     'detail_edge_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # Δz_detail shouldn't change edges
 
     # Latent group - KL and statistical health
-    # Start with only LOWER bound, add upper bound at epoch 25 once KL stabilizes
-    # Margin lowered to 1.0 since ultra-conservative init (logvar.bias=-5.0) gives KL~0.4
-    'kl_core': {'type': ConstraintType.LOWER, 'margin': 1.0},
-    'kl_detail': {'type': ConstraintType.LOWER, 'margin': 1.0},
+    # v16 FIX: Add upper bounds to prevent posterior collapse (KL explosion)
+    # BOX_ASYMMETRIC: Strong penalty below 'lower', soft penalty above 'upper', target 'healthy'
+    # For 128-dim VAE: ~10-20 nats/dim = 1280-2560 total is healthy
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50.0, 'upper': 6000.0, 'healthy': 1500.0, 'lower_scale': 2.0},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50.0, 'upper': 6000.0, 'healthy': 1500.0, 'lower_scale': 2.0},
 
     # Direct logvar constraints to prevent exp(logvar) explosion
     # logvar∈[-15,10] → std∈[0.0003, 148] → prevents numerical overflow
@@ -92,10 +93,13 @@ GOAL_SPECS = {
     'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # v15: Dimension capacity utilization (inactive/ineffective ratios - minimize these)
-    'core_active': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
-    'detail_active': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
-    'core_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
-    'detail_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
+    # v16 FIX: Use fixed scales (not 'auto') to force dimension usage from start
+    # Scale = 0.3 means: inactive_ratio must be < 0.3 to get score > 0.5
+    # This forces at least 70% of dims to be active (variance > 0.1)
+    'core_active': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},
+    'detail_active': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},
+    'core_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},
+    'detail_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},
 
     # v14: Detail contracts - WIDE initial bounds for feasible initialization
     'detail_mean': {'type': ConstraintType.BOX, 'lower': -15.0, 'upper': 15.0},

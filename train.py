@@ -158,6 +158,10 @@ for epoch in range(1, EPOCHS + 1):
     skip_count = 0
     all_mu_core, all_mu_detail = [], []
 
+    # Track consecutive rollbacks to avoid spam
+    consecutive_rollbacks = 0
+    first_rollback_info = None
+
     # LBO Directive #6: Natural adaptive squeeze - no manual recalibration
     # Only calibrate scales at epoch 1, then let LBO's infinite gradient do the work
     needs_recal = False
@@ -285,10 +289,50 @@ for epoch in range(1, EPOCHS + 1):
                 skip_count += 1
                 optimizer.zero_grad(set_to_none=True)
 
-                # Detailed diagnostic of what failed
-                diagnostic = diagnose_rollback(check_result, GROUP_NAMES)
-                print(f"[ROLLBACK] Epoch {epoch}, Batch {batch_idx}: {diagnostic}")
+                # Track consecutive rollbacks to batch output
+                consecutive_rollbacks += 1
+
+                if consecutive_rollbacks == 1:
+                    # First rollback - capture full diagnostic
+                    if check_result is not None:
+                        groups = check_result.get('groups', [])
+                        raw_vals = check_result.get('raw_values', {})
+                        min_group_val = groups.min().item() if len(groups) > 0 else 0.0
+
+                        # Find which constraint failed
+                        failed_goals = []
+                        for name, val in check_result.get('individual_goals', {}).items():
+                            if val <= 0:
+                                raw_val = raw_vals.get(name + '_raw', raw_vals.get(name, 'N/A'))
+                                failed_goals.append(f"{name}={val:.4f} (raw={raw_val})")
+
+                        first_rollback_info = {
+                            'batch': batch_idx,
+                            'min_group': min_group_val,
+                            'failed': ', '.join(failed_goals[:3]) if failed_goals else 'Unknown'  # Show first 3
+                        }
+                    else:
+                        first_rollback_info = {
+                            'batch': batch_idx,
+                            'min_group': 0.0,
+                            'failed': 'Loss returned None'
+                        }
+
+                    print(f"\n⚠️  [ROLLBACK] Epoch {epoch}, Batch {batch_idx}")
+                    print(f"    S_min = {first_rollback_info['min_group']:.6f}")
+                    print(f"    Failed: {first_rollback_info['failed']}")
+
+                elif consecutive_rollbacks % 10 == 0:
+                    # Every 10th consecutive rollback, show count
+                    print(f"    ... {consecutive_rollbacks} consecutive rollbacks (since batch {first_rollback_info['batch']})")
+
                 continue
+            else:
+                # Successful step - reset consecutive counter
+                if consecutive_rollbacks > 0:
+                    print(f"    ✓ Recovered after {consecutive_rollbacks} rollbacks (batch {batch_idx})\n")
+                    consecutive_rollbacks = 0
+                    first_rollback_info = None
         
         if batch_idx % 10 == 0:
             with torch.no_grad():

@@ -78,13 +78,14 @@ GOAL_SPECS = {
     'detail_edge_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # Δz_detail shouldn't change edges
 
     # Latent group - KL and statistical health
-    # v17b STRATEGY: Asymmetric squeeze - aggressive early (epoch 2), gentle late (epoch 15)
-    # Epoch 1: upper=45k (wide margin above init ~31k observed)
-    # Epoch 2+: Add ceiling, squeeze 15k→3k with schedule (see KL_SQUEEZE_SCHEDULE below)
+    # v17d STRATEGY: Adaptive ceiling discovery
+    # Epoch 1: NO upper bound (let LBO discover natural init, just enforce lower=100)
+    # Epoch 2: Set upper = max(KL_observed_epoch_1) automatically
+    # Epoch 3+: Squeeze via KL_SQUEEZE_SCHEDULE
     # Upper bounds prevent "high KL collapse" (all inputs → same point far from prior)
     # Lower bounds prevent "low KL collapse" (ignore latent space)
-    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 45000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
-    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 45000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 1e9, 'healthy': 3000.0, 'lower_scale': 2.0},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 1e9, 'healthy': 3000.0, 'lower_scale': 2.0},
 
     # Direct logvar constraints to prevent exp(logvar) explosion
     # logvar∈[-15,10] → std∈[0.0003, 148] → prevents numerical overflow
@@ -120,13 +121,14 @@ GOAL_SPECS = {
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
 }
 
-# v17: KL Asymmetric Squeeze Schedule (aggressive→gentle, target epoch 15)
-# Epoch 1: No ceiling (natural descent from init ~18k)
-# Epoch 2-15: Squeeze from 15k → 3k (aggressive early, gentle late)
+# v17d: KL Adaptive Squeeze Schedule (starts epoch 3, after ceiling discovery)
+# Epoch 1: NO ceiling (upper=1e9) - discover natural KL
+# Epoch 2: Ceiling = max(KL_epoch_1) - set dynamically in train.py
+# Epoch 3+: Squeeze from discovered ceiling → 3k (aggressive early, gentle late)
 KL_SQUEEZE_SCHEDULE = {
-    1: None,      # No ceiling - let natural descent happen
-    2: 15000,     # Add ceiling at observed value
-    3: 13000,     # -2000 (aggressive start)
+    1: None,      # No ceiling - discovery phase
+    2: None,      # Ceiling set dynamically from epoch 1 max
+    3: 13000,     # Start squeeze (aggressive -2k if ceiling was ~15k)
     4: 11000,     # -2000
     5: 9500,      # -1500
     6: 8200,      # -1300

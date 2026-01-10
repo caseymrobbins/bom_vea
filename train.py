@@ -272,7 +272,9 @@ for epoch in range(1, EPOCHS + 1):
             for module in model.modules():
                 if isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d)):
                     module.reset_running_stats()
-            print(f"✓ BatchNorm reset complete\n")
+            print(f"✓ BatchNorm reset complete")
+            print(f"⏭️  Skipping batch {batch_idx} to warm up BN stats with fresh forward pass\n")
+            continue  # Skip this batch, let BN warm up on next batch
 
         result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
 

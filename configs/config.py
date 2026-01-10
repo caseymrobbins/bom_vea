@@ -78,9 +78,11 @@ GOAL_SPECS = {
     # Latent group - KL and statistical health
     # v16 FIX: Add upper bounds to prevent posterior collapse (KL explosion)
     # BOX_ASYMMETRIC: Strong penalty below 'lower', soft penalty above 'upper', target 'healthy'
-    # For 128-dim VAE: ~10-20 nats/dim = 1280-2560 total is healthy
-    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50.0, 'upper': 6000.0, 'healthy': 1500.0, 'lower_scale': 2.0},
-    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 50.0, 'upper': 6000.0, 'healthy': 1500.0, 'lower_scale': 2.0},
+    # Observed init: KL_core~17k, KL_detail~18k nats (ultra-conservative encoder init)
+    # Upper bound MUST contain initialization! Set to 25k (40% margin above 18k)
+    # Healthy target: 3000 nats (~47 nats/dim for 64 dims - will tighten during training)
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 25000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 25000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
 
     # Direct logvar constraints to prevent exp(logvar) explosion
     # logvar∈[-15,10] → std∈[0.0003, 148] → prevents numerical overflow
@@ -102,7 +104,8 @@ GOAL_SPECS = {
     'detail_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},
 
     # v14: Detail contracts - WIDE initial bounds for feasible initialization
-    'detail_mean': {'type': ConstraintType.BOX, 'lower': -15.0, 'upper': 15.0},
+    # Observed init: detail_mean up to 17.84, widen to [-20, 20] for 20% margin
+    'detail_mean': {'type': ConstraintType.BOX, 'lower': -20.0, 'upper': 20.0},
     'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 350.0},  # Allow 0.0 at init
     'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 1.0},
     'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},

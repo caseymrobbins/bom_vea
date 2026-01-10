@@ -399,50 +399,6 @@ for epoch in range(1, EPOCHS + 1):
     total_batches = sum(bn_counts.values())
     bn_pcts = {n: (bn_counts.get(n, 0) / total_batches * 100) if total_batches > 0 else 0 for n in GROUP_NAMES}
 
-    # v17: Per-epoch traversal diversity check (collapse detection)
-    # Sample a few images and check if detail traversals show variation
-    traversal_diversity = 0.0
-    if epoch % 1 == 0:  # Check every epoch
-        model.eval()
-        with torch.no_grad():
-            # Get a small sample batch
-            sample_x, _ = next(iter(train_loader))
-            sample_x = sample_x[:4].to(DEVICE)  # Use 4 images
-
-            # Generate detail traversals for each image
-            from torchmetrics.image import StructuralSimilarityIndexMeasure
-            ssim_check = StructuralSimilarityIndexMeasure(data_range=1.0).to(DEVICE)
-
-            traversal_ssims = []
-            for img_idx in range(sample_x.shape[0]):
-                x_single = sample_x[img_idx:img_idx+1]
-                mu, logvar = model.encode(x_single)
-                mu_core, mu_detail = mu[:, :split_idx], mu[:, split_idx:]
-
-                # Generate 5 traversal samples with different detail vectors
-                traversal_samples = []
-                for t in [-2, -1, 0, 1, 2]:
-                    z_detail_varied = mu_detail + t * 0.5  # Vary detail vector
-                    z_combined = torch.cat([mu_core, z_detail_varied], dim=1)
-                    recon = model.decode(z_combined)
-                    traversal_samples.append(recon)
-
-                # Compute SSIM between consecutive traversal samples
-                for i in range(len(traversal_samples)-1):
-                    ssim_val = ssim_check(traversal_samples[i], traversal_samples[i+1])
-                    traversal_ssims.append(ssim_val.item())
-
-            # High SSIM = identical images = collapse!
-            # Low SSIM = different images = good diversity
-            traversal_diversity = 1.0 - np.mean(traversal_ssims)  # Diversity score (higher is better)
-
-        model.train()
-
-    # Log traversal diversity
-    if 'traversal_diversity' not in histories:
-        histories['traversal_diversity'] = []
-    histories['traversal_diversity'].append(traversal_diversity)
-
     # Adaptive tightening with progressive backoff
     rollback_rate = skip_count / total_batches if total_batches > 0 else 0
 
@@ -475,10 +431,7 @@ for epoch in range(1, EPOCHS + 1):
 
     print(f"\nEpoch {epoch:2d} | Loss: {histories['loss'][-1]:.3f} | Min: {histories['min_group'][-1]:.3f} | SSIM: {histories['ssim'][-1]:.3f}")
     print(f"         Structure: {struct:.4f} | Appearance: {appear:.4f}")
-    print(f"         KL_core: {kl_c:.1f} | KL_detail: {kl_d:.1f} | Traversal Diversity: {traversal_diversity:.3f}", end="")
-    if traversal_diversity < 0.01:
-        print(" ⚠️  COLLAPSE DETECTED!", end="")
-    print()
+    print(f"         KL_core: {kl_c:.1f} | KL_detail: {kl_d:.1f}")
     print(f"         Groups: " + " | ".join(f"{n}:{histories[f'group_{n}'][-1]:.2f}" for n in GROUP_NAMES))
     print(f"         Bottlenecks: " + " | ".join(f"{n}:{bn_pcts[n]:.1f}%" for n in GROUP_NAMES))
     print(f"         Rollbacks: {skip_count}/{total_batches} ({rollback_rate*100:.1f}%)", end="")

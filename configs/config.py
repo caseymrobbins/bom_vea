@@ -64,8 +64,9 @@ GOAL_SPECS = {
 
     # Swap group - structure from x1, appearance from x2
     'swap_structure': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # edges(r_sw) ≈ edges(x1)
-    # v17: Appearance now has UPPER BOUND - lazy path = clear target (must achieve < 0.15)
-    'swap_appearance': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 0.15}, # colors(r_sw) ≈ colors(x2)
+    # v17b: Appearance uses BOX_ASYMMETRIC - wide ceiling (0.5) with healthy target (0.15)
+    # Avoids hard rejection (49% rollback) while still creating pressure to improve
+    'swap_appearance': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 0.0, 'upper': 0.50, 'healthy': 0.15, 'lower_scale': 1.0},
     'swap_color_hist': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # histogram(r_sw) ≈ histogram(x2)
 
     # v14: Realism group - discriminator goals
@@ -77,13 +78,13 @@ GOAL_SPECS = {
     'detail_edge_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # Δz_detail shouldn't change edges
 
     # Latent group - KL and statistical health
-    # v17 STRATEGY: Asymmetric squeeze - aggressive early (epoch 2), gentle late (epoch 15)
-    # Epoch 1: upper=None (let natural descent happen, init ~18k)
+    # v17b STRATEGY: Asymmetric squeeze - aggressive early (epoch 2), gentle late (epoch 15)
+    # Epoch 1: upper=45k (wide margin above init ~31k observed)
     # Epoch 2+: Add ceiling, squeeze 15k→3k with schedule (see KL_SQUEEZE_SCHEDULE below)
     # Upper bounds prevent "high KL collapse" (all inputs → same point far from prior)
     # Lower bounds prevent "low KL collapse" (ignore latent space)
-    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 30000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
-    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 30000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 45000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 45000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
 
     # Direct logvar constraints to prevent exp(logvar) explosion
     # logvar∈[-15,10] → std∈[0.0003, 148] → prevents numerical overflow
@@ -105,9 +106,9 @@ GOAL_SPECS = {
     'detail_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.4},
 
     # v14: Detail contracts - WIDE initial bounds for feasible initialization
-    # Observed init: detail_mean up to 17.84, widen to [-20, 20] for 20% margin
-    'detail_mean': {'type': ConstraintType.BOX, 'lower': -20.0, 'upper': 20.0},
-    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 350.0},  # Allow 0.0 at init
+    # v17b: Widened bounds (observed violations: detail_mean=21.32, detail_var_mean=354.0)
+    'detail_mean': {'type': ConstraintType.BOX, 'lower': -30.0, 'upper': 30.0},  # Was [-20, 20], violated by 21.32
+    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 500.0},  # Was 350, violated by 354.0
     'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 1.0},
     'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 

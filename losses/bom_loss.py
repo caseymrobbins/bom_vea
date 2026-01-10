@@ -234,6 +234,12 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
 def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None):
     """Compute LBO loss with grouped goals. Pure min() barrier (no softmin - violates LBO)."""
     if not all([check_tensor(t) for t in [recon, x, mu, logvar, z]]):
+        # DIAGNOSTIC: Show which input tensor is unhealthy
+        bad_tensors = []
+        for name, t in [('recon', recon), ('x', x), ('mu', mu), ('logvar', logvar), ('z', z)]:
+            if not check_tensor(t):
+                bad_tensors.append(name)
+        print(f"    [INPUT TENSOR FAILURE] Bad tensors: {', '.join(bad_tensors)}")
         return None
 
     B = x.shape[0]
@@ -243,12 +249,19 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
     recon_core = model.decode(z_core_only)  # No clamp - decoder sigmoid handles mapping
-    if not check_tensor(recon_core): return None
+    if not check_tensor(recon_core):
+        print(f"    [DECODER FAILURE] recon_core contains NaN/Inf")
+        return None
 
     with torch.no_grad():
         x_feat = vgg(x)
     recon_feat = vgg(recon)
-    if not all([check_tensor(t) for t in [x_feat, recon_feat]]): return None
+    if not all([check_tensor(t) for t in [x_feat, recon_feat]]):
+        bad_feats = []
+        if not check_tensor(x_feat): bad_feats.append('x_feat')
+        if not check_tensor(recon_feat): bad_feats.append('recon_feat')
+        print(f"    [VGG FEATURE FAILURE] Bad features: {', '.join(bad_feats)}")
+        return None
     edges_x = edges(x)
 
     # GROUP A: RECONSTRUCTION
@@ -450,7 +463,16 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var, g_core_var_max, g_detail_var_max])
 
     groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_disentangle, group_latent, group_health])
-    if torch.isnan(groups).any() or torch.isinf(groups).any(): return None
+    if torch.isnan(groups).any() or torch.isinf(groups).any():
+        # DIAGNOSTIC: Show which groups have NaN/Inf
+        group_status = []
+        for i, (name, g) in enumerate(zip(group_names, groups)):
+            if torch.isnan(g):
+                group_status.append(f"{name}=NaN")
+            elif torch.isinf(g):
+                group_status.append(f"{name}=Inf")
+        print(f"    [NaN/Inf DETECTED] {', '.join(group_status)}")
+        return None
 
     # LBO Directive #1: Pure min() barrier (no softmin - violates LBO)
     min_group = groups.min()
@@ -465,7 +487,9 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     # LBO Directive #1: Pure log barrier, NO EPSILON!
     loss = -torch.log(min_group)
-    if torch.isnan(loss): return None
+    if torch.isnan(loss):
+        print(f"    [LOSS NaN] -log({min_group:.6f}) = NaN")
+        return None
 
     individual_goals = {
         'pixel': g_pixel.item(), 'edge': g_edge.item(), 'perceptual': g_perceptual.item(),

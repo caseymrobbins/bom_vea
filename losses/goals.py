@@ -42,8 +42,8 @@ def make_normalizer_torch(ctype: ConstraintType, **kwargs) -> Callable:
         return soft_asymmetric_box
     
     if ctype == ConstraintType.MINIMIZE_SOFT:
-        scale = kwargs["scale"]
-        return lambda x: torch.exp(-torch.clamp(x, min=0.0) / scale) if scale > 0 else torch.zeros_like(x)
+        scale = max(kwargs["scale"], 1e-6)  # Enforce minimum scale to prevent numerical instability
+        return lambda x: torch.exp(-torch.clamp(x, min=0.0) / scale)
     
     if ctype == ConstraintType.MINIMIZE_HARD:
         scale = kwargs.get("scale", 1.0)
@@ -87,11 +87,11 @@ class GoalSystem:
                     max_val = np.max(self.samples[name])
                     mean_val = np.mean(self.samples[name])
                     # Use max if median is near zero (prevents over-sensitivity)
-                    # Minimum scale 0.001 to prevent goals from collapsing to zero
+                    # Minimum scale 1e-3 to prevent numerical instability
                     if median < 1e-4:
-                        self.scales[name] = max(max_val, 0.001)
+                        self.scales[name] = max(max_val, 1e-3)
                     else:
-                        self.scales[name] = max(median, 0.001)
+                        self.scales[name] = max(median, 1e-3)
 
                     # Apply epoch 1 safety margin
                     self.scales[name] *= epoch1_margin
@@ -217,6 +217,9 @@ class GoalSystem:
         print("=" * 60 + "\n")
 
 def geometric_mean(goals):
-    """Geometric mean - crashes on exact zero (fail-fast BOM)"""
+    """Geometric mean with epsilon protection against underflow"""
     goals = torch.stack(goals)
-    return goals.prod() ** (1.0 / len(goals))
+    # Clamp to prevent underflow in product (min value = 1e-10 → prod^(1/n) ≥ 1e-10)
+    goals = torch.clamp(goals, min=1e-10)
+    product = goals.prod()
+    return product ** (1.0 / len(goals))

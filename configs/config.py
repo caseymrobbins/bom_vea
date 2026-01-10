@@ -1,6 +1,6 @@
 # configs/config.py
-# v15: Hierarchical latent constraints + dimension utilization enforcement
-# NEW: Added 4 capacity goals (core_active, detail_active, core_effective, detail_effective)
+# v17: "Lazy Optimizer" design - clear targets and asymmetric squeeze
+# NEW: KL upper bounds with aggressive→gentle squeeze, appearance hard requirement, relaxed capacity
 
 import torch
 
@@ -15,10 +15,10 @@ if torch.cuda.is_available():
 USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during backward pass with LBO rollback mechanism
 
 # Training
-EPOCHS = 25  # v16: Reduced from 35 (expect stable training to epoch 20+)
+EPOCHS = 25  # v17: Target KL=3k by epoch 15
 BATCH_SIZE = 512  # A100: 40GB VRAM (L4 used 256 with 24GB)
-LEARNING_RATE = 2e-3  # v16: INCREASED from 5e-4! LBO seeks interior (middle), not edge - barriers protect boundaries
-LEARNING_RATE_D = 2e-4  # Discriminator learning rate (10x slower than main, was 5e-5)
+LEARNING_RATE = 3e-3  # v17: INCREASED to 3e-3 (20x efficiency vs standard VAE, 1.5x vs v16)
+LEARNING_RATE_D = 3e-4  # Discriminator learning rate (10x slower than main, maintains ratio)
 WEIGHT_DECAY = 1e-5
 CALIBRATION_BATCHES = 200
 
@@ -33,7 +33,7 @@ DATA_PATH = '/content/celeba'
 ZIP_PATH = '/content/img_align_celeba.zip'
 
 # Output
-OUTPUT_DIR = '/content/outputs_bom_v16'  # v16: LBO Constitution compliance fixes
+OUTPUT_DIR = '/content/outputs_bom_v17'  # v17: Lazy optimizer design with KL squeeze
 EVAL_SAMPLES = 10000
 NUM_TRAVERSE_DIMS = 15
 
@@ -64,7 +64,8 @@ GOAL_SPECS = {
 
     # Swap group - structure from x1, appearance from x2
     'swap_structure': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # edges(r_sw) ≈ edges(x1)
-    'swap_appearance': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # colors(r_sw) ≈ colors(x2)
+    # v17: Appearance now has UPPER BOUND - lazy path = clear target (must achieve < 0.15)
+    'swap_appearance': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 0.15}, # colors(r_sw) ≈ colors(x2)
     'swap_color_hist': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # histogram(r_sw) ≈ histogram(x2)
 
     # v14: Realism group - discriminator goals
@@ -76,13 +77,13 @@ GOAL_SPECS = {
     'detail_edge_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # Δz_detail shouldn't change edges
 
     # Latent group - KL and statistical health
-    # v16 STRATEGY: Let KL self-regulate during epoch 1 (naturally drops 60k → 10k by epoch 2)
-    # LOWER bounds only: Prevent ignoring latent space, but no upper bound for epoch 1
-    # Observed: KL starts 60k-65k (high LR), but naturally descends rapidly without constraint
-    # Capacity constraints (scale=0.3 below) prevent "collapse to single point" mode
-    # If posterior collapse appears later, add upper bounds starting epoch 2+
-    'kl_core': {'type': ConstraintType.LOWER, 'margin': 100.0},
-    'kl_detail': {'type': ConstraintType.LOWER, 'margin': 100.0},
+    # v17 STRATEGY: Asymmetric squeeze - aggressive early (epoch 2), gentle late (epoch 15)
+    # Epoch 1: upper=None (let natural descent happen, init ~18k)
+    # Epoch 2+: Add ceiling, squeeze 15k→3k with schedule (see KL_SQUEEZE_SCHEDULE below)
+    # Upper bounds prevent "high KL collapse" (all inputs → same point far from prior)
+    # Lower bounds prevent "low KL collapse" (ignore latent space)
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 30000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 30000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
 
     # Direct logvar constraints to prevent exp(logvar) explosion
     # logvar∈[-15,10] → std∈[0.0003, 148] → prevents numerical overflow
@@ -95,13 +96,13 @@ GOAL_SPECS = {
     'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # v15: Dimension capacity utilization (inactive/ineffective ratios - minimize these)
-    # v16 FIX: Use fixed scales (not 'auto') to force dimension usage from start
-    # Scale = 0.3 means: inactive_ratio must be < 0.3 to get score > 0.5
-    # This forces at least 70% of dims to be active (variance > 0.1)
-    'core_active': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},
-    'detail_active': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},
-    'core_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},
-    'detail_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.3},
+    # v17 FIX: Relaxed from 0.3 to 0.4 (70%→60% active) to reduce conflict with variance constraints
+    # Scale = 0.4 means: inactive_ratio < 0.28 to get score > 0.5 (requires 46+/64 dims active)
+    # Still enforces capacity, but gives more breathing room for detail variance
+    'core_active': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.4},
+    'detail_active': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.4},
+    'core_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.4},
+    'detail_effective': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.4},
 
     # v14: Detail contracts - WIDE initial bounds for feasible initialization
     # Observed init: detail_mean up to 17.84, widen to [-20, 20] for 20% margin
@@ -110,20 +111,40 @@ GOAL_SPECS = {
     'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 1.0},
     'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
-    # Health group - v16: WIDER bounds to prevent collapse (was 300, now 600)
+    # Health group - v17: WIDER variance bounds to allow latent space spreading
     'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 0.70},  # Allow exactly 0.0 at init
-    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 600.0},  # v16: Doubled to prevent squeeze death
-    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 600.0},  # v16: Doubled to prevent squeeze death
+    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 1200.0},  # v17: Doubled again (600→1200)
+    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 1200.0},  # v17: Allow 2x spreading vs v16
     'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
 }
 
+# v17: KL Asymmetric Squeeze Schedule (aggressive→gentle, target epoch 15)
+# Epoch 1: No ceiling (natural descent from init ~18k)
+# Epoch 2-15: Squeeze from 15k → 3k (aggressive early, gentle late)
+KL_SQUEEZE_SCHEDULE = {
+    1: None,      # No ceiling - let natural descent happen
+    2: 15000,     # Add ceiling at observed value
+    3: 13000,     # -2000 (aggressive start)
+    4: 11000,     # -2000
+    5: 9500,      # -1500
+    6: 8200,      # -1300
+    7: 7000,      # -1200
+    8: 6000,      # -1000
+    9: 5200,      # -800
+    10: 4600,     # -600
+    11: 4100,     # -500
+    12: 3700,     # -400
+    13: 3400,     # -300
+    14: 3200,     # -200
+    15: 3000,     # -200 (target reached!)
+}
+
 # LBO Directive #6: Adaptive Squeeze with rollback monitoring
-# Constitution: "move Failure threshold 10% closer when S_min > 0.5"
-# v16 fix: Reduced aggression (10% instead of 5%), added stability check, earlier backoff
-ADAPTIVE_TIGHTENING_START = 8  # Start tightening after epoch 7 (more warmup)
-ADAPTIVE_TIGHTENING_RATES = [0.90, 0.92, 0.94, 0.96, 0.98]  # 10%, 8%, 6%, 4%, 2% tightening
-ROLLBACK_THRESHOLD_MAX = 0.15  # If rollback rate > 15%, back off immediately (was 50% - too late!)
+# v17: Simplified to constant 5% squeeze every epoch after convergence (epoch 5)
+ADAPTIVE_TIGHTENING_START = 6  # Start after epoch 5 (convergence)
+ADAPTIVE_TIGHTENING_RATE = 0.95  # Constant 5% squeeze per epoch (simple and predictable)
+ROLLBACK_THRESHOLD_MAX = 0.15  # If rollback rate > 15%, back off immediately
 ROLLBACK_THRESHOLD_TARGET = 0.05  # Target: 5% rollback rate (optimal squeeze)
 MIN_GROUP_STABILITY_THRESHOLD = 0.50  # Only tighten if avg min_group > 0.5 (Directive #6)
 STABILITY_WINDOW = 3  # Check last 3 epochs for stability

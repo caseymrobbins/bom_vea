@@ -429,11 +429,14 @@ for epoch in range(1, EPOCHS + 1):
         print(f"   Setting ceiling: {discovered_ceiling:,.1f}")
 
         # Update KL bounds for epoch 2+
-        GOAL_SPECS['kl_core']['upper'] = discovered_ceiling
-        GOAL_SPECS['kl_detail']['upper'] = discovered_ceiling
-        goal_system.specs = GOAL_SPECS
-        goal_system.initialize_normalizers()
-        print(f"   ✓ KL ceiling will activate at start of epoch 2\n")
+        if discovered_ceiling > 0:  # Only set if we have valid data
+            GOAL_SPECS['kl_core']['upper'] = discovered_ceiling
+            GOAL_SPECS['kl_detail']['upper'] = discovered_ceiling
+            goal_system.specs = GOAL_SPECS
+            goal_system.rebuild_normalizers()  # Fixed: was initialize_normalizers()
+            print(f"   ✓ KL ceiling will activate at start of epoch 2\n")
+        else:
+            print(f"   ⚠️  WARNING: No valid KL data (all rollbacks). Keeping unbounded for epoch 2.\n")
 
     if all_mu_core:
         mc, md = torch.cat(all_mu_core), torch.cat(all_mu_detail)

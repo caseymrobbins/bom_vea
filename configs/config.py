@@ -64,9 +64,9 @@ GOAL_SPECS = {
 
     # Swap group - structure from x1, appearance from x2
     'swap_structure': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # edges(r_sw) ≈ edges(x1)
-    # v17b: Appearance uses BOX_ASYMMETRIC - wide ceiling (0.5) with healthy target (0.15)
-    # Avoids hard rejection (49% rollback) while still creating pressure to improve
-    'swap_appearance': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 0.0, 'upper': 0.50, 'healthy': 0.15, 'lower_scale': 1.0},
+    # v17e: Keep appearance as MINIMIZE_SOFT (BOX_ASYMMETRIC caused 100% rollbacks)
+    # Detail usage will be enforced by: (1) KL squeeze forcing latent usage, (2) capacity constraints
+    'swap_appearance': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # colors(r_sw) ≈ colors(x2)
     'swap_color_hist': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # histogram(r_sw) ≈ histogram(x2)
 
     # v14: Realism group - discriminator goals

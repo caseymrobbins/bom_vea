@@ -458,6 +458,9 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     # LBO Directive #4: Reject S_min ≤ 0 BEFORE log calculation to prevent crash
     if min_group <= 0:
+        # DIAGNOSTIC: Show which group failed and by how much
+        group_name = group_names[min_group_idx] if min_group_idx < len(group_names) else f"group_{min_group_idx}"
+        print(f"    [LBO BARRIER] Group '{group_name}' failed: S_min = {min_group:.6f}")
         return None  # Trigger rollback - constraint violated
 
     # LBO Directive #1: Pure log barrier, NO EPSILON!

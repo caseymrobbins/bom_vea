@@ -227,10 +227,12 @@ for epoch in range(1, EPOCHS + 1):
             print("-" * 100)
             raw_vals = result['raw_values']
             norm_vals = result['individual_goals']
-            for goal_name in sorted(raw_vals.keys()):
-                raw = raw_vals[goal_name]
-                norm = norm_vals[goal_name]
-                print(f"  {goal_name:20s} | Raw: {raw:10.6f} → Normalized: {norm:6.4f}")
+            # Only iterate over keys that exist in both dictionaries (actual goals, not diagnostics)
+            for goal_name in sorted(norm_vals.keys()):
+                if goal_name in raw_vals:
+                    raw = raw_vals[goal_name]
+                    norm = norm_vals[goal_name]
+                    print(f"  {goal_name:20s} | Raw: {raw:10.6f} → Normalized: {norm:6.4f}")
             print("-" * 100 + "\n")
 
         # BOM philosophy: Let it crash loudly if constraints violated, don't mask with reloads

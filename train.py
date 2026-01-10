@@ -195,7 +195,38 @@ for epoch in range(1, EPOCHS + 1):
         
         with torch.no_grad():
             x_aug = apply_augmentation(x)
-        
+
+        # DIAGNOSTIC: Check batch health before forward pass
+        if batch_idx in [199, 200] or (batch_idx > 200 and batch_idx % 50 == 0):
+            with torch.no_grad():
+                print(f"\n🔍 BATCH {batch_idx} DIAGNOSTICS:")
+                print(f"   Input x: min={x.min():.4f}, max={x.max():.4f}, has_nan={torch.isnan(x).any()}, has_inf={torch.isinf(x).any()}")
+
+                # Check model weights
+                sample_param = next(model.parameters())
+                print(f"   Model weights: has_nan={torch.isnan(sample_param).any()}, has_inf={torch.isinf(sample_param).any()}")
+
+                # Check if any gradients are present (should be zero after zero_grad, but let's check)
+                has_grads = any(p.grad is not None for p in model.parameters())
+                if has_grads:
+                    grad_sample = next(p.grad for p in model.parameters() if p.grad is not None)
+                    print(f"   ⚠️  Gradients still present! has_nan={torch.isnan(grad_sample).any()}")
+
+                # Check if encoder produces NaN
+                test_mu, test_logvar = model.encode(x)
+                print(f"   Encoder mu: min={test_mu.min():.4f}, max={test_mu.max():.4f}, has_nan={torch.isnan(test_mu).any()}")
+                print(f"   Encoder logvar: min={test_logvar.min():.4f}, max={test_logvar.max():.4f}, has_nan={torch.isnan(test_logvar).any()}")
+
+                if not torch.isnan(test_mu).any() and not torch.isnan(test_logvar).any():
+                    # Encoder is fine, check reparameterize
+                    test_z = model.reparameterize(test_mu, test_logvar)
+                    print(f"   Reparameterize z: min={test_z.min():.4f}, max={test_z.max():.4f}, has_nan={torch.isnan(test_z).any()}")
+
+                    if not torch.isnan(test_z).any():
+                        # z is fine, check decoder
+                        test_recon = model.decode(test_z)
+                        print(f"   Decoder recon: min={test_recon.min():.4f}, max={test_recon.max():.4f}, has_nan={torch.isnan(test_recon).any()}")
+
         optimizer.zero_grad(set_to_none=True)
         recon, mu, logvar, z = model(x)
         

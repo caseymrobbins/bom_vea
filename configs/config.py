@@ -17,8 +17,8 @@ USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during ba
 # Training
 EPOCHS = 25  # v16: Reduced from 35 (expect stable training to epoch 20+)
 BATCH_SIZE = 512  # A100: 40GB VRAM (L4 used 256 with 24GB)
-LEARNING_RATE = 1e-3
-LEARNING_RATE_D = 1e-4  # Discriminator learning rate (slower)
+LEARNING_RATE = 5e-4  # v16: Reduced from 1e-3 for more stable constraint satisfaction
+LEARNING_RATE_D = 5e-5  # Discriminator learning rate (10x slower than main, was 1e-4)
 WEIGHT_DECAY = 1e-5
 CALIBRATION_BATCHES = 200
 

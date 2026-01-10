@@ -174,8 +174,8 @@ for epoch in range(1, EPOCHS + 1):
     if epoch == 2 and goal_system.epoch1_margin_applied:
         goal_system.remove_epoch1_margin()
 
-    # v17: Apply KL squeeze schedule (aggressive→gentle, target epoch 15)
-    if epoch in KL_SQUEEZE_SCHEDULE:
+    # v17d: Apply KL squeeze schedule (starts epoch 3, after ceiling discovery in epoch 1)
+    if epoch in KL_SQUEEZE_SCHEDULE and epoch >= 3:  # Start squeeze from epoch 3
         new_upper = KL_SQUEEZE_SCHEDULE[epoch]
         if new_upper is not None:
             # Update both kl_core and kl_detail upper bounds
@@ -416,7 +416,25 @@ for epoch in range(1, EPOCHS + 1):
     last_good_state_d = copy.deepcopy(discriminator.state_dict())
     last_good_optimizer = copy.deepcopy(optimizer.state_dict())
     last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
-    
+
+    # v17d: At end of epoch 1, discover max KL and set as ceiling for epoch 2+
+    if epoch == 1 and goal_system.calibrated:
+        max_kl_core = max(epoch_data['kl_core_raw']) if epoch_data['kl_core_raw'] else 0
+        max_kl_detail = max(epoch_data['kl_detail_raw']) if epoch_data['kl_detail_raw'] else 0
+        discovered_ceiling = max(max_kl_core, max_kl_detail)
+
+        print(f"\n🔍 EPOCH 1 KL DISCOVERY:")
+        print(f"   Max KL_core:   {max_kl_core:,.1f}")
+        print(f"   Max KL_detail: {max_kl_detail:,.1f}")
+        print(f"   Setting ceiling: {discovered_ceiling:,.1f}")
+
+        # Update KL bounds for epoch 2+
+        GOAL_SPECS['kl_core']['upper'] = discovered_ceiling
+        GOAL_SPECS['kl_detail']['upper'] = discovered_ceiling
+        goal_system.specs = GOAL_SPECS
+        goal_system.initialize_normalizers()
+        print(f"   ✓ KL ceiling will activate at start of epoch 2\n")
+
     if all_mu_core:
         mc, md = torch.cat(all_mu_core), torch.cat(all_mu_detail)
         cv, dv = mc.var(0), md.var(0)

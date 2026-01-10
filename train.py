@@ -1,8 +1,8 @@
-# train.py - v15: Hierarchical latent constraints + dimension utilization enforcement
+# train.py - v16: LBO Constitution compliance fixes (adaptive squeeze + stability check)
 # Core = STRUCTURE (edges, geometry)
 # Detail = APPEARANCE (colors, lighting)
-# NEW: Latent group now has 4 sub-groups: KL, Structure, Capacity, Detail Stats
-# NEW: Capacity sub-group enforces active/effective dimension utilization
+# Latent group has 4 sub-groups: KL, Structure, Capacity, Detail Stats
+# v16 fixes: S_min > 0.5 stability check, 10% tightening, 15% backoff threshold
 import os, sys, time, copy
 import torch
 import torch.nn.functional as F
@@ -130,13 +130,14 @@ histories = {
 dim_variance_history = {'core': [], 'detail': []}
 
 print("\n" + "=" * 100)
-print(f"BOM VAE v15 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
-print("v15: LBO Constitutional compliance with pure min() barrier")
+print(f"BOM VAE v16 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
+print("v16: LBO Constitution compliance FIXES (epoch 13-14 collapse prevented)")
 print("     - Directive #1: Pure -log(min(S_i)) - NO softmin, NO epsilon")
 print("     - Directive #3: No clamping on goals")
 print("     - Directive #4: Discrete rejection/rollback on S_min ≤ 0")
-print(f"     - Directive #6: Adaptive squeeze with backoff (start 5%, back off to 4%/3%/2%/1% if >50% rollbacks)")
-print(f"     - Target: {ROLLBACK_THRESHOLD_TARGET*100:.0f}% rollback rate, then +1 epoch and stop")
+print(f"     - Directive #6 FIX: Adaptive squeeze 10%/8%/6% (was 5%/4%/3%) + S_min > 0.5 stability check")
+print(f"     - Backoff at {ROLLBACK_THRESHOLD_MAX*100:.0f}% (was 50%), target {ROLLBACK_THRESHOLD_TARGET*100:.0f}% rollback rate")
+print(f"     - Start tightening epoch {ADAPTIVE_TIGHTENING_START} (was 5), health bounds 2x wider")
 print("     - Behavioral disentanglement (core→structure, detail→appearance)")
 print("=" * 100 + "\n")
 
@@ -219,6 +220,18 @@ for epoch in range(1, EPOCHS + 1):
             needs_recal = False
 
         result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
+
+        # v16: Debug output for raw and normalized values (once per epoch)
+        if DEBUG_RAW_NORMALIZED and batch_idx == 0 and epoch >= 2 and goal_system.calibrated:
+            print(f"\n🔍 DEBUG: Raw vs Normalized Values (Epoch {epoch}, Batch {batch_idx})")
+            print("-" * 100)
+            raw_vals = result['raw_values']
+            norm_vals = result['individual_goals']
+            for goal_name in sorted(raw_vals.keys()):
+                raw = raw_vals[goal_name]
+                norm = norm_vals[goal_name]
+                print(f"  {goal_name:20s} | Raw: {raw:10.6f} → Normalized: {norm:6.4f}")
+            print("-" * 100 + "\n")
 
         # BOM philosophy: Let it crash loudly if constraints violated, don't mask with reloads
         if result is None:
@@ -463,8 +476,8 @@ torch.save({
     'histories': histories,
     'scales': goal_system.scales,
     'dim_var': dim_variance_history
-}, f'{OUTPUT_DIR}/bom_vae_v14.pt')
-print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v14.pt")
+}, f'{OUTPUT_DIR}/bom_vae_v16.pt')
+print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v16.pt")
 
 # EVAL
 print("\n" + "=" * 60 + "\nEVALUATION\n" + "=" * 60)
@@ -497,7 +510,7 @@ print(f"\n  MSE:   {mse_t/(cnt*3*64*64):.6f}\n  SSIM:  {np.mean(ss):.4f}\n  LPIP
 # VIZ
 print("\nGenerating visualizations...")
 samples, _ = next(iter(train_loader))
-plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v14 - {data_info['name']}")
+plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v16 - {data_info['name']}")
 plot_reconstructions(model, samples, split_idx, f'{OUTPUT_DIR}/reconstructions.png', DEVICE)
 plot_traversals(model, samples, split_idx, f'{OUTPUT_DIR}/traversals_core.png', f'{OUTPUT_DIR}/traversals_detail.png', NUM_TRAVERSE_DIMS, DEVICE)
 plot_cross_reconstruction(model, samples, split_idx, f'{OUTPUT_DIR}/cross_reconstruction.png', DEVICE)

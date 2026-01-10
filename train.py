@@ -272,6 +272,12 @@ for epoch in range(1, EPOCHS + 1):
             'optimizer': copy.deepcopy(optimizer.state_dict())
         }
 
+        # DIAGNOSTIC: Check model health BEFORE step
+        with torch.no_grad():
+            sample_param = next(model.parameters())
+            if torch.isnan(sample_param).any() or torch.isinf(sample_param).any():
+                print(f"    [PRE-STEP] Model weights already corrupted BEFORE optimizer.step()!")
+
         optimizer.step()
 
         # Look-ahead: Check if the update caused any group to violate constraints
@@ -288,6 +294,19 @@ for epoch in range(1, EPOCHS + 1):
                 optimizer.load_state_dict(state_before_step['optimizer'])
                 skip_count += 1
                 optimizer.zero_grad(set_to_none=True)
+
+                # DIAGNOSTIC: Verify restoration worked
+                with torch.no_grad():
+                    sample_param_after = next(model.parameters())
+                    if torch.isnan(sample_param_after).any() or torch.isinf(sample_param_after).any():
+                        print(f"    [POST-ROLLBACK] Model weights STILL corrupted after restore!")
+                    # Also test forward pass after restore
+                    try:
+                        recon_test, mu_test, logvar_test, z_test = model(x)
+                        if torch.isnan(recon_test).any() or torch.isnan(mu_test).any():
+                            print(f"    [POST-ROLLBACK] Forward pass still produces NaN after restore!")
+                    except:
+                        print(f"    [POST-ROLLBACK] Forward pass crashed after restore!")
 
                 # Track consecutive rollbacks to batch output
                 consecutive_rollbacks += 1

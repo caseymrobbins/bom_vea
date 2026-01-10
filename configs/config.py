@@ -78,11 +78,11 @@ GOAL_SPECS = {
     # Latent group - KL and statistical health
     # v16 FIX: Add upper bounds to prevent posterior collapse (KL explosion)
     # BOX_ASYMMETRIC: Strong penalty below 'lower', soft penalty above 'upper', target 'healthy'
-    # Observed init: KL_core~17k, KL_detail~18k nats (ultra-conservative encoder init)
-    # Upper bound MUST contain initialization! Set to 25k (40% margin above 18k)
-    # Healthy target: 3000 nats (~47 nats/dim for 64 dims - will tighten during training)
-    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 25000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
-    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 25000.0, 'healthy': 3000.0, 'lower_scale': 2.0},
+    # Observed init with LR=2e-3: KL_core~65k, KL_detail~54k nats (high LR causes faster encoder learning during calibration)
+    # Upper bound MUST contain initialization! Set to 80k (23% margin above 65k)
+    # Healthy target: 5000 nats (will naturally descend from 60k → 10k → 5k over epochs 1-10)
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 80000.0, 'healthy': 5000.0, 'lower_scale': 2.0},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 80000.0, 'healthy': 5000.0, 'lower_scale': 2.0},
 
     # Direct logvar constraints to prevent exp(logvar) explosion
     # logvar∈[-15,10] → std∈[0.0003, 148] → prevents numerical overflow

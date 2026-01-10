@@ -15,7 +15,7 @@ if torch.cuda.is_available():
 USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during backward pass with LBO rollback mechanism
 
 # Training
-EPOCHS = 35
+EPOCHS = 25  # v16: Reduced from 35 (expect stable training to epoch 20+)
 BATCH_SIZE = 512  # A100: 40GB VRAM (L4 used 256 with 24GB)
 LEARNING_RATE = 1e-3
 LEARNING_RATE_D = 1e-4  # Discriminator learning rate (slower)
@@ -33,11 +33,12 @@ DATA_PATH = '/content/celeba'
 ZIP_PATH = '/content/img_align_celeba.zip'
 
 # Output
-OUTPUT_DIR = '/content/outputs_bom_v14'
+OUTPUT_DIR = '/content/outputs_bom_v16'  # v16: LBO Constitution compliance fixes
 EVAL_SAMPLES = 10000
 NUM_TRAVERSE_DIMS = 15
 
 USE_AUGMENTATION = True
+DEBUG_RAW_NORMALIZED = True  # v16: Print raw and normalized values once per epoch for debugging
 
 # LBO Directive #1: Must use pure min() - softmin violates LBO by smoothing the barrier
 

@@ -1,8 +1,8 @@
-# train.py - v16: LBO Constitution compliance fixes (adaptive squeeze + stability check)
+# train.py - v17: "Lazy Optimizer" design with asymmetric KL squeeze
 # Core = STRUCTURE (edges, geometry)
 # Detail = APPEARANCE (colors, lighting)
 # Latent group has 4 sub-groups: KL, Structure, Capacity, Detail Stats
-# v16 fixes: S_min > 0.5 stability check, 10% tightening, 15% backoff threshold
+# v17 changes: KL squeeze 15k→3k (epochs 2-15), appearance upper bound, relaxed capacity (0.4)
 import os, sys, time, copy
 import torch
 import torch.nn.functional as F
@@ -130,7 +130,7 @@ histories = {
 dim_variance_history = {'core': [], 'detail': []}
 
 print("\n" + "=" * 100)
-print(f"BOM VAE v16 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
+print(f"BOM VAE v17 - {data_info['name'].upper()} - {EPOCHS} EPOCHS")
 print("v16: LBO Constitution compliance FIXES (epoch 13-14 collapse prevented)")
 print("     - Directive #1: Pure -log(min(S_i)) - NO softmin, NO epsilon")
 print("     - Directive #3: No clamping on goals")
@@ -149,7 +149,6 @@ print("=" * 100 + "\n")
 
 # Adaptive tightening termination: track when threshold is hit
 threshold_hit_epoch = None
-tightening_rate_idx = 0  # Start with most aggressive (5%)
 previous_goal_specs = None  # For rollback if tightening is too aggressive
 
 for epoch in range(1, EPOCHS + 1):
@@ -170,6 +169,18 @@ for epoch in range(1, EPOCHS + 1):
     # Remove epoch 1 safety margin at start of epoch 2
     if epoch == 2 and goal_system.epoch1_margin_applied:
         goal_system.remove_epoch1_margin()
+
+    # v17: Apply KL squeeze schedule (aggressive→gentle, target epoch 15)
+    if epoch in KL_SQUEEZE_SCHEDULE:
+        new_upper = KL_SQUEEZE_SCHEDULE[epoch]
+        if new_upper is not None:
+            # Update both kl_core and kl_detail upper bounds
+            GOAL_SPECS['kl_core']['upper'] = new_upper
+            GOAL_SPECS['kl_detail']['upper'] = new_upper
+            # Re-initialize goal system normalizers with new bounds
+            goal_system.goal_specs = GOAL_SPECS
+            goal_system.initialize_normalizers()
+            print(f"🔽 KL ceiling squeezed to {new_upper:,} nats (epoch {epoch})")
 
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
@@ -388,10 +399,54 @@ for epoch in range(1, EPOCHS + 1):
     total_batches = sum(bn_counts.values())
     bn_pcts = {n: (bn_counts.get(n, 0) / total_batches * 100) if total_batches > 0 else 0 for n in GROUP_NAMES}
 
+    # v17: Per-epoch traversal diversity check (collapse detection)
+    # Sample a few images and check if detail traversals show variation
+    traversal_diversity = 0.0
+    if epoch % 1 == 0:  # Check every epoch
+        model.eval()
+        with torch.no_grad():
+            # Get a small sample batch
+            sample_x, _ = next(iter(train_loader))
+            sample_x = sample_x[:4].to(DEVICE)  # Use 4 images
+
+            # Generate detail traversals for each image
+            from torchmetrics.image import StructuralSimilarityIndexMeasure
+            ssim_check = StructuralSimilarityIndexMeasure(data_range=1.0).to(DEVICE)
+
+            traversal_ssims = []
+            for img_idx in range(sample_x.shape[0]):
+                x_single = sample_x[img_idx:img_idx+1]
+                mu, logvar = model.encode(x_single)
+                mu_core, mu_detail = mu[:, :split_idx], mu[:, split_idx:]
+
+                # Generate 5 traversal samples with different detail vectors
+                traversal_samples = []
+                for t in [-2, -1, 0, 1, 2]:
+                    z_detail_varied = mu_detail + t * 0.5  # Vary detail vector
+                    z_combined = torch.cat([mu_core, z_detail_varied], dim=1)
+                    recon = model.decode(z_combined)
+                    traversal_samples.append(recon)
+
+                # Compute SSIM between consecutive traversal samples
+                for i in range(len(traversal_samples)-1):
+                    ssim_val = ssim_check(traversal_samples[i], traversal_samples[i+1])
+                    traversal_ssims.append(ssim_val.item())
+
+            # High SSIM = identical images = collapse!
+            # Low SSIM = different images = good diversity
+            traversal_diversity = 1.0 - np.mean(traversal_ssims)  # Diversity score (higher is better)
+
+        model.train()
+
+    # Log traversal diversity
+    if 'traversal_diversity' not in histories:
+        histories['traversal_diversity'] = []
+    histories['traversal_diversity'].append(traversal_diversity)
+
     # Adaptive tightening with progressive backoff
     rollback_rate = skip_count / total_batches if total_batches > 0 else 0
 
-    # Check if last tightening was too aggressive (>50% rollbacks) - RESTORE previous constraints
+    # Check if last tightening was too aggressive (>15% rollbacks) - RESTORE previous constraints
     if epoch >= ADAPTIVE_TIGHTENING_START + 1 and rollback_rate > ROLLBACK_THRESHOLD_MAX and previous_goal_specs is not None:
         print(f"\n⚠️  Rollback rate too high ({rollback_rate*100:.0f}%), RESTORING previous constraints")
         # Restore the constraints from before tightening
@@ -399,17 +454,12 @@ for epoch in range(1, EPOCHS + 1):
             GOAL_SPECS[name] = copy.deepcopy(previous_goal_specs[name])
         goal_system.specs = GOAL_SPECS
         goal_system.rebuild_normalizers()
-
-        # Back off to gentler tightening rate
-        if tightening_rate_idx < len(ADAPTIVE_TIGHTENING_RATES) - 1:
-            tightening_rate_idx += 1
-            tightening_pct = int((1 - ADAPTIVE_TIGHTENING_RATES[tightening_rate_idx]) * 100)
-            print(f"         Backing off to {tightening_pct}% tightening for future epochs")
         previous_goal_specs = None  # Clear backup
 
     # Decide if we should tighten this epoch
     # LBO Directive #6: Only tighten when "VAE stabilizes (S_min > 0.5)"
-    current_rate = ADAPTIVE_TIGHTENING_RATES[tightening_rate_idx]
+    # v17: Constant 5% squeeze every epoch (simplified from progressive rates)
+    current_rate = ADAPTIVE_TIGHTENING_RATE
 
     # Check stability: average min_group over last STABILITY_WINDOW epochs
     from configs.config import MIN_GROUP_STABILITY_THRESHOLD, STABILITY_WINDOW
@@ -425,7 +475,10 @@ for epoch in range(1, EPOCHS + 1):
 
     print(f"\nEpoch {epoch:2d} | Loss: {histories['loss'][-1]:.3f} | Min: {histories['min_group'][-1]:.3f} | SSIM: {histories['ssim'][-1]:.3f}")
     print(f"         Structure: {struct:.4f} | Appearance: {appear:.4f}")
-    print(f"         KL_core: {kl_c:.1f} | KL_detail: {kl_d:.1f}")
+    print(f"         KL_core: {kl_c:.1f} | KL_detail: {kl_d:.1f} | Traversal Diversity: {traversal_diversity:.3f}", end="")
+    if traversal_diversity < 0.01:
+        print(" ⚠️  COLLAPSE DETECTED!", end="")
+    print()
     print(f"         Groups: " + " | ".join(f"{n}:{histories[f'group_{n}'][-1]:.2f}" for n in GROUP_NAMES))
     print(f"         Bottlenecks: " + " | ".join(f"{n}:{bn_pcts[n]:.1f}%" for n in GROUP_NAMES))
     print(f"         Rollbacks: {skip_count}/{total_batches} ({rollback_rate*100:.1f}%)", end="")
@@ -478,8 +531,8 @@ torch.save({
     'histories': histories,
     'scales': goal_system.scales,
     'dim_var': dim_variance_history
-}, f'{OUTPUT_DIR}/bom_vae_v16.pt')
-print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v16.pt")
+}, f'{OUTPUT_DIR}/bom_vae_v17.pt')
+print(f"\n✓ Saved to {OUTPUT_DIR}/bom_vae_v17.pt")
 
 # EVAL
 print("\n" + "=" * 60 + "\nEVALUATION\n" + "=" * 60)
@@ -512,7 +565,7 @@ print(f"\n  MSE:   {mse_t/(cnt*3*64*64):.6f}\n  SSIM:  {np.mean(ss):.4f}\n  LPIP
 # VIZ
 print("\nGenerating visualizations...")
 samples, _ = next(iter(train_loader))
-plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v16 - {data_info['name']}")
+plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v17 - {data_info['name']}")
 plot_reconstructions(model, samples, split_idx, f'{OUTPUT_DIR}/reconstructions.png', DEVICE)
 plot_traversals(model, samples, split_idx, f'{OUTPUT_DIR}/traversals_core.png', f'{OUTPUT_DIR}/traversals_detail.png', NUM_TRAVERSE_DIMS, DEVICE)
 plot_cross_reconstruction(model, samples, split_idx, f'{OUTPUT_DIR}/cross_reconstruction.png', DEVICE)

@@ -393,8 +393,16 @@ for epoch in range(1, EPOCHS + 1):
         previous_goal_specs = None  # Clear backup
 
     # Decide if we should tighten this epoch
+    # LBO Directive #6: Only tighten when "VAE stabilizes (S_min > 0.5)"
     current_rate = ADAPTIVE_TIGHTENING_RATES[tightening_rate_idx]
-    should_tighten = epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate < ROLLBACK_THRESHOLD_TARGET
+
+    # Check stability: average min_group over last STABILITY_WINDOW epochs
+    from configs.config import MIN_GROUP_STABILITY_THRESHOLD, STABILITY_WINDOW
+    recent_min_groups = histories['min_group'][-STABILITY_WINDOW:] if len(histories['min_group']) >= STABILITY_WINDOW else histories['min_group']
+    avg_min_group = sum(recent_min_groups) / len(recent_min_groups) if recent_min_groups else 0.0
+    is_stable = avg_min_group >= MIN_GROUP_STABILITY_THRESHOLD
+
+    should_tighten = epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate < ROLLBACK_THRESHOLD_TARGET and is_stable
 
     # Track when we first hit the target threshold
     if epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate >= ROLLBACK_THRESHOLD_TARGET and threshold_hit_epoch is None:
@@ -409,7 +417,7 @@ for epoch in range(1, EPOCHS + 1):
 
     if should_tighten:
         tightening_pct = int((1 - current_rate) * 100)
-        print(f" → 🔧 TIGHTENING {tightening_pct}% (rate < {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")
+        print(f" → 🔧 TIGHTENING {tightening_pct}% (rollback={rollback_rate*100:.1f}% < {ROLLBACK_THRESHOLD_TARGET*100:.0f}%, stable={avg_min_group:.3f} > {MIN_GROUP_STABILITY_THRESHOLD})")
 
         # Save current constraints before tightening (for potential rollback)
         previous_goal_specs = {name: copy.deepcopy(spec) for name, spec in GOAL_SPECS.items()}
@@ -436,7 +444,10 @@ for epoch in range(1, EPOCHS + 1):
         goal_system.rebuild_normalizers()
     else:
         if epoch >= ADAPTIVE_TIGHTENING_START:
-            print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")
+            if not is_stable:
+                print(f" → ⏸️  Skipping tightening (unstable: avg_min={avg_min_group:.3f} < {MIN_GROUP_STABILITY_THRESHOLD})")
+            else:
+                print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")
         else:
             print()
 

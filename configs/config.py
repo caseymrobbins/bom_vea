@@ -102,20 +102,22 @@ GOAL_SPECS = {
     'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 1.0},
     'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
-    # Health group - WIDE initial bounds, tighten at epoch 27
+    # Health group - v16: WIDER bounds to prevent collapse (was 300, now 600)
     'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 0.70},  # Allow exactly 0.0 at init
-    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 300.0},  # Allow 0.0 at init
-    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 300.0},  # Allow 0.0 at init
+    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 600.0},  # v16: Doubled to prevent squeeze death
+    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 600.0},  # v16: Doubled to prevent squeeze death
     'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},
 }
 
 # LBO Directive #6: Adaptive Squeeze with rollback monitoring
-# After epoch 4 (plateau), tighten ALL constraints slightly each epoch
-# If too many rollbacks, back off progressively: 5% -> 4% -> 3% -> 2% -> 1%
-ADAPTIVE_TIGHTENING_START = 5  # Start tightening after epoch 4
-ADAPTIVE_TIGHTENING_RATES = [0.95, 0.96, 0.97, 0.98, 0.99]  # Try these rates in order (5%, 4%, 3%, 2%, 1% tightening)
-ROLLBACK_THRESHOLD_MAX = 0.50  # If rollback rate > 50%, tightening was too aggressive - back off
+# Constitution: "move Failure threshold 10% closer when S_min > 0.5"
+# v16 fix: Reduced aggression (10% instead of 5%), added stability check, earlier backoff
+ADAPTIVE_TIGHTENING_START = 8  # Start tightening after epoch 7 (more warmup)
+ADAPTIVE_TIGHTENING_RATES = [0.90, 0.92, 0.94, 0.96, 0.98]  # 10%, 8%, 6%, 4%, 2% tightening
+ROLLBACK_THRESHOLD_MAX = 0.15  # If rollback rate > 15%, back off immediately (was 50% - too late!)
 ROLLBACK_THRESHOLD_TARGET = 0.05  # Target: 5% rollback rate (optimal squeeze)
+MIN_GROUP_STABILITY_THRESHOLD = 0.50  # Only tighten if avg min_group > 0.5 (Directive #6)
+STABILITY_WINDOW = 3  # Check last 3 epochs for stability
 
 GROUP_NAMES = ['recon', 'core', 'swap', 'realism', 'disentangle', 'latent', 'health']

@@ -225,9 +225,18 @@ class GoalSystem:
         print("=" * 60 + "\n")
 
 def geometric_mean(goals):
-    """Geometric mean with epsilon protection against underflow"""
+    """Geometric mean using log-space arithmetic to prevent underflow/overflow.
+
+    Standard formula: geom_mean = (∏ goals)^(1/n)
+    Log-space:        geom_mean = exp(mean(log(goals)))
+
+    This prevents:
+    - Underflow: (1e-10)^30 = 1e-300 → 0 in float32
+    - Overflow: (100)^30 = 1e60 → Inf in float32
+    """
     goals = torch.stack(goals)
-    # Clamp to prevent underflow in product (min value = 1e-10 → prod^(1/n) ≥ 1e-10)
+    # Clamp to prevent log(0) = -inf
     goals = torch.clamp(goals, min=1e-10)
-    product = goals.prod()
-    return product ** (1.0 / len(goals))
+    # Compute geometric mean in log space: exp(mean(log(goals)))
+    log_goals = torch.log(goals)
+    return torch.exp(log_goals.mean())

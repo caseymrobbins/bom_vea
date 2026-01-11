@@ -116,7 +116,7 @@ GOAL_SPECS = {
     'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # Health group - v17: WIDER variance bounds to allow latent space spreading
-    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 0.70},  # Allow exactly 0.0 at init
+    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 1.00},  # v17f: Widened 0.70→1.00 (saw 0.69 at boundary)
     'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 1200.0},  # v17: Doubled again (600→1200)
     'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 1200.0},  # v17: Allow 2x spreading vs v16
     'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 100.0},

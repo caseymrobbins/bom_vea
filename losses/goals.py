@@ -61,23 +61,27 @@ class GoalSystem:
         self.calibration_count = 0
         self.epoch1_margin_applied = False  # Track if 10% safety margin is active
 
-        # Initialize all goals with LARGE scales before calibration
-        # This allows the LBO loss to compute during the calibration phase
+        # Initialize all goals with VERY LARGE scales before calibration
+        # This allows the LBO loss to compute during the calibration phase without gradient explosions
         # Calibration will then set proper scales based on observed MAX values
-        print("\n🔧 Initializing goal system with large scales for calibration...")
+        print("\n🔧 Initializing goal system with very large scales for calibration...")
         for name, spec in goal_specs.items():
             ctype = spec['type']
             if ctype == ConstraintType.MINIMIZE_SOFT:
                 if spec.get('scale') == 'auto':
-                    # Auto-scaled goals: Start with very large scale (100.0)
-                    # This ensures all values get good scores during calibration
-                    self.scales[name] = 100.0
-                    self.normalizers[name] = make_normalizer_torch(ctype, scale=100.0)
-                    print(f"  {name:20s}: scale=100.0 (auto, will calibrate)")
+                    # Auto-scaled goals: Start with VERY large scale (1000.0)
+                    # At initialization, losses are huge - need generous scaling
+                    # exp(-x/1000) ensures even x=500 gets score 0.61 (good enough for calibration)
+                    self.scales[name] = 1000.0
+                    self.normalizers[name] = make_normalizer_torch(ctype, scale=1000.0)
+                    print(f"  {name:20s}: scale=1000.0 (auto, will calibrate)")
                 else:
-                    # Fixed-scale goals: Use specified value
-                    self.scales[name] = spec['scale']
-                    self.normalizers[name] = make_normalizer_torch(ctype, scale=spec['scale'])
+                    # Fixed-scale goals: Use specified value multiplied by 10x during calibration
+                    # This prevents immediate gradient explosions before calibration completes
+                    calib_scale = spec['scale'] * 10.0
+                    self.scales[name] = calib_scale
+                    self.normalizers[name] = make_normalizer_torch(ctype, scale=calib_scale)
+                    print(f"  {name:20s}: scale={calib_scale:.1f} (fixed, 10x for calibration)")
             elif ctype == ConstraintType.BOX:
                 self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'])
             elif ctype == ConstraintType.BOX_ASYMMETRIC:
@@ -86,7 +90,7 @@ class GoalSystem:
                 self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
             else:
                 self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
-        print("✅ Initial scales set - ready for LBO calibration\n")
+        print("✅ Initial scales set (very permissive) - ready for LBO calibration\n")
     
     def collect(self, loss_dict: Dict[str, float]):
         for name, value in loss_dict.items():
@@ -251,10 +255,23 @@ def geometric_mean(goals):
     This prevents:
     - Underflow: (1e-10)^30 = 1e-300 → 0 in float32
     - Overflow: (100)^30 = 1e60 → Inf in float32
+
+    LBO COMPLIANCE (Directive #4):
+    - NO CLAMP! If any goal ≤ 0, this returns 0 to trigger discrete rollback
+    - Clamping would artificially inflate failed constraints, preventing rollback
     """
     goals = torch.stack(goals)
-    # Clamp to prevent log(0) = -inf
-    goals = torch.clamp(goals, min=1e-10)
+
+    # LBO: NO CLAMP - let goals naturally reach 0 to trigger rollback
+    # Check if any goal is ≤ 0 BEFORE log (discrete rollback)
+    if (goals <= 0).any():
+        return torch.tensor(0.0, device=goals.device, requires_grad=True)
+
     # Compute geometric mean in log space: exp(mean(log(goals)))
     log_goals = torch.log(goals)
+
+    # Check for -inf from log() of very small positive values
+    if torch.isinf(log_goals).any():
+        return torch.tensor(0.0, device=goals.device, requires_grad=True)
+
     return torch.exp(log_goals.mean())

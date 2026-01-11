@@ -72,8 +72,10 @@ GOAL_SPECS = {
     'swap_color_hist': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # histogram(r_sw) ≈ histogram(x2)
 
     # v14: Realism group - discriminator goals
-    'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # D should classify recon as real
-    'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},   # D should classify swap as real
+    # Fixed scale=2.0: Discriminator untrained during calibration (D≈0.5), but learns quickly
+    # After training starts, D(recon) can reach 0.99. Need large scale to handle this range.
+    'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 2.0},  # D should classify recon as real
+    'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 2.0},   # D should classify swap as real
 
     # Behavioral walls (what core/detail actually DO)
     'core_color_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # Δz_core shouldn't change colors

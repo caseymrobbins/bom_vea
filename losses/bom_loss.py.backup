@@ -1,6 +1,8 @@
 # losses/bom_loss.py
-# CLEAN REWRITE - LBO VAE Loss Function
-# All goals organized by group with clear structure
+# v15: Hierarchical latent constraints + dimension utilization enforcement
+# r_sw should have: x1's STRUCTURE + x2's APPEARANCE
+# NEW: Latent group split into 4 sub-groups (KL, Structure, Capacity, Detail Stats)
+# NEW: Capacity sub-group enforces that all 64 core + 64 detail dims are utilized
 
 import torch
 import torch.nn.functional as F
@@ -29,18 +31,35 @@ def color_histogram(img, bins=16):
     """Color histogram - captures color distribution / APPEARANCE."""
     B, C, H, W = img.shape
     img_flat = img.view(B, C, -1)  # (B, 3, H*W)
-
+    
+    # Compute histogram per channel
     histograms = []
     for c in range(C):
+        # Soft histogram using gaussian kernels
         pixels = img_flat[:, c, :]  # (B, H*W)
-        bin_centers = torch.linspace(0, 1, bins, device=img.device)
-        diff = pixels.unsqueeze(-1) - bin_centers.view(1, 1, -1)
-        weights = torch.exp(-diff.pow(2) / 0.01)
-        hist = weights.sum(dim=1)
-        hist = hist / (hist.sum(dim=1, keepdim=True) + 1e-8)
+        bin_centers = torch.linspace(0, 1, bins, device=img.device)  # (bins,)
+        
+        # Distance from each pixel to each bin center
+        diff = pixels.unsqueeze(-1) - bin_centers.view(1, 1, -1)  # (B, H*W, bins)
+        weights = torch.exp(-diff.pow(2) / 0.01)  # soft assignment
+        hist = weights.sum(dim=1)  # (B, bins)
+        hist = hist / (hist.sum(dim=1, keepdim=True) + 1e-8)  # normalize
         histograms.append(hist)
+    
+    return torch.cat(histograms, dim=1)  # (B, 3*bins)
 
-    return torch.cat(histograms, dim=1)
+def spatial_color_map(img, grid_size=4):
+    """Spatial color - captures local appearance / lighting."""
+    # Downsample to grid_size x grid_size and flatten
+    downsampled = F.adaptive_avg_pool2d(img, grid_size)  # (B, 3, grid, grid)
+    return downsampled.view(img.shape[0], -1)  # (B, 3*grid*grid)
+
+def luminance_map(img):
+    """Luminance/brightness map - captures lighting pattern."""
+    # Convert to grayscale luminance
+    lum = 0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
+    # Downsample to capture broad lighting
+    return F.adaptive_avg_pool2d(lum, 8)  # (B, 1, 8, 8)
 
 def compute_ssim(x, y, window_size=11):
     C1, C2 = 0.01**2, 0.03**2
@@ -60,14 +79,14 @@ def check_tensor(t):
     return not (torch.isnan(t).any() or torch.isinf(t).any())
 
 def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discriminator=None, x_aug=None):
-    """Compute all raw losses for calibration. Used to collect statistics before setting scales."""
+    """Compute all raw losses for calibration. v14: Discriminator + detail contracts + traversal meaning."""
     B = x.shape[0]
     z_core, z_detail = z[:, :split_idx], z[:, split_idx:]
     mu_core, mu_detail = mu[:, :split_idx], mu[:, split_idx:]
     logvar_core, logvar_detail = logvar[:, :split_idx], logvar[:, split_idx:]
 
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
-    recon_core = model.decode(z_core_only)
+    recon_core = model.decode(z_core_only)  # No clamp - decoder sigmoid handles mapping
 
     with torch.no_grad():
         x_feat = vgg(x)
@@ -76,25 +95,24 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
 
     losses = {}
 
-    # Reconstruction
     pixel_mse = F.mse_loss(recon, x)
     ssim_val = compute_ssim(recon, x)
     if torch.isnan(ssim_val): ssim_val = torch.tensor(0.0, device=x.device)
     losses['pixel'] = (pixel_mse + 0.1 * (1.0 - ssim_val)).item()
     losses['edge'] = F.mse_loss(edges(recon), edges_x).item()
     losses['perceptual'] = F.mse_loss(recon_feat, x_feat).item()
-
-    # Core
     losses['core_mse'] = F.mse_loss(recon_core, x).item()
     losses['core_edge'] = F.mse_loss(edges(recon_core), edges_x).item()
 
-    # Swap
+    # Structure/appearance on swapped reconstruction
     if B >= 4:
         perm = torch.randperm(B, device=x.device)
         x1, x2 = x, x[perm]
         z1_core, z2_detail = z_core, z_detail[perm]
+
         z_sw = torch.cat([z1_core, z2_detail], dim=1)
-        r_sw = model.decode(z_sw)
+        r_sw = model.decode(z_sw)  # No clamp - decoder sigmoid handles mapping
+
         losses['swap_structure'] = F.mse_loss(edges(r_sw), edges(x1)).item()
         losses['swap_appearance'] = F.mse_loss(mean_color(r_sw), mean_color(x2)).item()
         losses['swap_color_hist'] = F.mse_loss(color_histogram(r_sw), color_histogram(x2)).item()
@@ -102,20 +120,21 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
         losses['swap_structure'] = 0.1
         losses['swap_appearance'] = 0.01
         losses['swap_color_hist'] = 0.01
-        r_sw = recon
+        r_sw = recon  # Fallback for discriminator
 
-    # Realism
+    # v14: Discriminator realism scores
     if discriminator is not None:
         with torch.no_grad():
             d_recon = torch.sigmoid(discriminator(recon)).mean()
             d_swap = torch.sigmoid(discriminator(r_sw)).mean()
+        # We want D scores HIGH (close to 1 = realistic), so loss = (1 - D_score)
         losses['realism_recon'] = (1.0 - d_recon).item()
         losses['realism_swap'] = (1.0 - d_swap).item()
     else:
         losses['realism_recon'] = 0.5
         losses['realism_swap'] = 0.5
 
-    # KL
+    # v14: KL for BOTH core and detail - no clamps, let BOX constraints enforce bounds
     logvar_core_safe = torch.clamp(logvar_core, min=-30.0, max=20.0)
     kl_per_dim_core = -0.5 * (1 + logvar_core_safe - mu_core.pow(2) - logvar_core_safe.exp())
     losses['kl_core'] = kl_per_dim_core.sum(dim=1).mean().item()
@@ -124,14 +143,14 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     kl_per_dim_detail = -0.5 * (1 + logvar_detail_safe - mu_detail.pow(2) - logvar_detail_safe.exp())
     losses['kl_detail'] = kl_per_dim_detail.sum(dim=1).mean().item()
 
+    # Direct logvar values - prevent explosion
     losses['logvar_core'] = logvar_core.mean().item()
     losses['logvar_detail'] = logvar_detail.mean().item()
 
-    # Structure
-    z_c = z_core - z_core.mean(0, keepdim=True)
+    z_c = z_core - z_core.mean(0, keepdim=True)  # No clamp on z
     cov = (z_c.T @ z_c) / (B - 1 + 1e-8)
     diag = torch.diag(cov) + 1e-8
-    losses['cov'] = ((cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum()).item()
+    losses['cov'] = ((cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum()).item()  # No clamp on cov
     losses['weak'] = (mu_core.var(0) < 0.1).float().mean().item()
 
     if x_aug is not None:
@@ -142,7 +161,51 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     else:
         losses['core_consistency'] = 0.01
 
-    # Capacity
+    # v14: Detail contracts - ensure detail channel has proper statistics
+    losses['detail_mean'] = mu_detail.mean(0).abs().mean().item()  # Mean across batch, then dims
+    losses['detail_var_mean'] = mu_detail.var(0).mean().item()     # Variance across batch, mean over dims
+
+    # Detail covariance (same as core cov calculation)
+    z_d = z_detail - z_detail.mean(0, keepdim=True)  # No clamp on z
+    cov_d = (z_d.T @ z_d) / (B - 1 + 1e-8)
+    diag_d = torch.diag(cov_d) + 1e-8
+    losses['detail_cov'] = ((cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum()).item()  # No clamp on cov
+
+    # v14: Behavioral checks + traversal meaning (intervention testing)
+    with torch.no_grad():
+        noise_scale = 0.5
+        # Core-only perturbation
+        z_core_pert = z_core + torch.randn_like(z_core) * noise_scale
+        z_pert_core = torch.cat([z_core_pert, z_detail], dim=1)
+        recon_pert_core = model.decode(z_pert_core)
+        # Detail-only perturbation
+        z_detail_pert = z_detail + torch.randn_like(z_detail) * noise_scale
+        z_pert_detail = torch.cat([z_core, z_detail_pert], dim=1)
+        recon_pert_detail = model.decode(z_pert_detail)
+
+    core_color_leak = F.mse_loss(mean_color(recon_pert_core), mean_color(recon))
+    detail_edge_leak = F.mse_loss(edges(recon_pert_detail), edges(recon))
+    losses['core_color_leak'] = core_color_leak.item()
+    losses['detail_edge_leak'] = detail_edge_leak.item()
+
+    core_edge_shift = F.mse_loss(edges(recon_pert_core), edges(recon))
+    detail_color_shift = F.mse_loss(mean_color(recon_pert_detail), mean_color(recon))
+    traversal_loss = 0.5 * (
+        1.0 / (core_edge_shift + 1e-4) +
+        1.0 / (detail_color_shift + 1e-4)
+    )
+    losses['traversal'] = traversal_loss.item()
+    losses['traversal_core_effect'] = core_edge_shift.item()
+    losses['traversal_detail_effect'] = detail_color_shift.item()
+
+    detail_contrib = (recon - recon_core).abs().mean()
+    losses['detail_ratio'] = (detail_contrib / (recon_core.abs().mean() + 1e-8)).item()
+    losses['core_var_health'] = mu_core.var(0).median().item()
+    losses['detail_var_health'] = mu_detail.var(0).median().item()
+    losses['core_var_max'] = mu_core.var(0).max().item()
+    losses['detail_var_max'] = mu_detail.var(0).max().item()
+
+    # v15: Dimension capacity utilization metrics
     core_var_per_dim = mu_core.var(0)
     detail_var_per_dim = mu_detail.var(0)
     core_active_count = (core_var_per_dim > 0.1).float().sum()
@@ -164,69 +227,14 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     losses['core_effective'] = core_ineffective_ratio.item()
     losses['detail_effective'] = detail_ineffective_ratio.item()
 
-    # Detail stats
-    losses['detail_mean'] = mu_detail.mean(0).abs().mean().item()
-    losses['detail_var_mean'] = mu_detail.var(0).mean().item()
-
-    z_d = z_detail - z_detail.mean(0, keepdim=True)
-    cov_d = (z_d.T @ z_d) / (B - 1 + 1e-8)
-    diag_d = torch.diag(cov_d) + 1e-8
-    losses['detail_cov'] = ((cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum()).item()
-
-    # Disentangle
-    with torch.no_grad():
-        noise_scale = 0.5
-        z_core_pert = z_core + torch.randn_like(z_core) * noise_scale
-        z_pert_core = torch.cat([z_core_pert, z_detail], dim=1)
-        recon_pert_core = model.decode(z_pert_core)
-
-        z_detail_pert = z_detail + torch.randn_like(z_detail) * noise_scale
-        z_pert_detail = torch.cat([z_core, z_detail_pert], dim=1)
-        recon_pert_detail = model.decode(z_pert_detail)
-
-    core_color_leak = F.mse_loss(mean_color(recon_pert_core), mean_color(recon))
-    detail_edge_leak = F.mse_loss(edges(recon_pert_detail), edges(recon))
-    losses['core_color_leak'] = core_color_leak.item()
-    losses['detail_edge_leak'] = detail_edge_leak.item()
-
-    core_edge_shift = F.mse_loss(edges(recon_pert_core), edges(recon))
-    detail_color_shift = F.mse_loss(mean_color(recon_pert_detail), mean_color(recon))
-    traversal_loss = 0.5 * (
-        1.0 / (core_edge_shift + 1e-4) +
-        1.0 / (detail_color_shift + 1e-4)
-    )
-    losses['traversal'] = traversal_loss.item()
-    losses['traversal_core_effect'] = core_edge_shift.item()
-    losses['traversal_detail_effect'] = detail_color_shift.item()
-
-    # Health
-    detail_contrib = (recon - recon_core).abs().mean()
-    losses['detail_ratio'] = (detail_contrib / (recon_core.abs().mean() + 1e-8)).item()
-    losses['core_var_health'] = mu_core.var(0).median().item()
-    losses['detail_var_health'] = mu_detail.var(0).median().item()
-    losses['core_var_max'] = mu_core.var(0).max().item()
-    losses['detail_var_max'] = mu_detail.var(0).max().item()
-
     losses['_ssim'] = ssim_val.item()
 
     return losses
 
-
 def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None):
-    """
-    LBO VAE Loss Function - Clean Implementation
-
-    Computes loss as: -log(min(groups)) where each group is geometric mean of goals
-
-    LBO Directives:
-    1. Pure min() barrier - NO softmin, NO epsilon on loss
-    2. Pure geometric mean - NO epsilon on aggregation
-    3. NO clamping on goals or groups
-    4. Discrete rollback if any group ≤ 0
-    """
-
-    # ========== INPUT VALIDATION ==========
+    """Compute LBO loss with grouped goals. Pure min() barrier (no softmin - violates LBO)."""
     if not all([check_tensor(t) for t in [recon, x, mu, logvar, z]]):
+        # DIAGNOSTIC: Show which input tensor is unhealthy
         bad_tensors = []
         for name, t in [('recon', recon), ('x', x), ('mu', mu), ('logvar', logvar), ('z', z)]:
             if not check_tensor(t):
@@ -239,14 +247,12 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     mu_core, mu_detail = mu[:, :split_idx], mu[:, split_idx:]
     logvar_core, logvar_detail = logvar[:, :split_idx], logvar[:, split_idx:]
 
-    # ========== DECODE CORE-ONLY ==========
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
-    recon_core = model.decode(z_core_only)
+    recon_core = model.decode(z_core_only)  # No clamp - decoder sigmoid handles mapping
     if not check_tensor(recon_core):
         print(f"    [DECODER FAILURE] recon_core contains NaN/Inf")
         return None
 
-    # ========== EXTRACT FEATURES ==========
     with torch.no_grad():
         x_feat = vgg(x)
     recon_feat = vgg(recon)
@@ -256,54 +262,52 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         if not check_tensor(recon_feat): bad_feats.append('recon_feat')
         print(f"    [VGG FEATURE FAILURE] Bad features: {', '.join(bad_feats)}")
         return None
-
     edges_x = edges(x)
 
-    # ========== GROUP A: RECONSTRUCTION ==========
-    # Full image quality metrics
+    # GROUP A: RECONSTRUCTION
     pixel_mse = F.mse_loss(recon, x)
     ssim_val = compute_ssim(recon, x)
     if torch.isnan(ssim_val): ssim_val = torch.tensor(0.0, device=x.device)
-
     g_pixel = goals.goal(pixel_mse + 0.1 * (1.0 - ssim_val), 'pixel')
-    g_edge = goals.goal(F.mse_loss(edges(recon), edges_x), 'edge')
+    edge_loss = F.mse_loss(edges(recon), edges_x)
+    g_edge = goals.goal(edge_loss, 'edge')
     g_perceptual = goals.goal(F.mse_loss(recon_feat, x_feat), 'perceptual')
 
-    # ========== GROUP B: CORE ==========
-    # Core (structure channel) should preserve structure
+    # GROUP B: CORE STRUCTURE
     g_core_mse = goals.goal(F.mse_loss(recon_core, x), 'core_mse')
     g_core_edge = goals.goal(F.mse_loss(edges(recon_core), edges_x), 'core_edge')
-
-    # ========== GROUP C: SWAP ==========
-    # Structure from x1, appearance from x2
+    
+    # GROUP C: SWAP - structure/appearance separation
     if B >= 4:
         perm = torch.randperm(B, device=x.device)
         x1, x2 = x, x[perm]
         z1_core, z2_detail = z_core, z_detail[perm]
+
         z_sw = torch.cat([z1_core, z2_detail], dim=1)
-        r_sw = model.decode(z_sw)
+        r_sw = model.decode(z_sw)  # No clamp - decoder sigmoid handles mapping
 
         structure_loss = F.mse_loss(edges(r_sw), edges(x1))
-        appearance_loss = F.mse_loss(mean_color(r_sw), mean_color(x2))
-        color_hist_loss = F.mse_loss(color_histogram(r_sw), color_histogram(x2))
-
         g_swap_structure = goals.goal(structure_loss, 'swap_structure')
+
+        appearance_loss = F.mse_loss(mean_color(r_sw), mean_color(x2))
         g_swap_appearance = goals.goal(appearance_loss, 'swap_appearance')
+
+        color_hist_loss = F.mse_loss(color_histogram(r_sw), color_histogram(x2))
         g_swap_color_hist = goals.goal(color_hist_loss, 'swap_color_hist')
     else:
-        # Batch too small for swapping
         g_swap_structure = torch.tensor(0.5, device=x.device)
         g_swap_appearance = torch.tensor(0.5, device=x.device)
         g_swap_color_hist = torch.tensor(0.5, device=x.device)
         structure_loss = appearance_loss = color_hist_loss = torch.tensor(0.0, device=x.device)
-        r_sw = recon
+        r_sw = recon  # Fallback for discriminator
 
-    # ========== GROUP D: REALISM ==========
-    # Discriminator should classify reconstructions as real
+    # GROUP D: REALISM (v14 - Discriminator)
     if discriminator is not None:
         d_recon_logits = discriminator(recon)
         d_swap_logits = discriminator(r_sw)
 
+        # LBO Directive #3: No clamping on raw outputs
+        # If discriminator produces extreme logits causing NaN, Directive #4 rollback will handle it
         # Want D scores HIGH (realistic), so minimize (1 - sigmoid(D))
         realism_loss_recon = 1.0 - torch.sigmoid(d_recon_logits).mean()
         realism_loss_swap = 1.0 - torch.sigmoid(d_swap_logits).mean()
@@ -315,16 +319,20 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         g_realism_swap = torch.tensor(0.5, device=x.device)
         realism_loss_recon = realism_loss_swap = torch.tensor(0.0, device=x.device)
 
-    # ========== GROUP E: DISENTANGLE ==========
-    # Behavioral walls: core affects structure, detail affects appearance
+    # GROUP E: DISENTANGLEMENT - behavioral walls via intervention testing
+    # Test: What happens when we perturb ONLY core or ONLY detail?
+    # Wall 1: Perturbing core should NOT change colors (core doesn't leak into appearance)
+    # Wall 2: Perturbing detail should NOT change edges (detail doesn't leak into structure)
+    # Traversal meaning: perturbations should change their intended targets.
+    # Controlled perturbation magnitude (0.5 std units)
     noise_scale = 0.5
 
-    # Core perturbation: should change structure, NOT colors
+    # Core-only perturbation: change structure channel, keep appearance channel same
     z_core_pert = z_core + torch.randn_like(z_core) * noise_scale
     z_pert_core = torch.cat([z_core_pert, z_detail], dim=1)
     recon_pert_core = model.decode(z_pert_core)
 
-    # Detail perturbation: should change colors, NOT structure
+    # Detail-only perturbation: change appearance channel, keep structure channel same
     z_detail_pert = z_detail + torch.randn_like(z_detail) * noise_scale
     z_pert_detail = torch.cat([z_core, z_detail_pert], dim=1)
     recon_pert_detail = model.decode(z_pert_detail)
@@ -336,20 +344,20 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     g_core_color_leak = goals.goal(core_color_leak, 'core_color_leak')
     g_detail_edge_leak = goals.goal(detail_edge_leak, 'detail_edge_leak')
 
-    # Measure intended effects (should be LARGE) - used for traversal metric
     core_edge_shift = F.mse_loss(edges(recon_pert_core), edges(recon))
     detail_color_shift = F.mse_loss(mean_color(recon_pert_detail), mean_color(recon))
-
-    # Traversal: reward large intended shifts (1/shift → minimize shift^-1)
+    # Use 1e-2 epsilon: gradient of 1/(x+eps) is -1/(x+eps)^2
+    # With eps=1e-4: grad can reach 1e8 when x→0
+    # With eps=1e-2: grad maxes at 1e4 (much safer)
     traversal_loss = 0.5 * (
         1.0 / (core_edge_shift + 1e-2) +
         1.0 / (detail_color_shift + 1e-2)
     )
     g_traversal = goals.goal(traversal_loss, 'traversal')
 
-    # ========== GROUP F: LATENT (Hierarchical) ==========
+    # GROUP F: LATENT QUALITY (v15 - Hierarchical with capacity enforcement)
 
-    # SUB-GROUP F1: KL (Distribution Matching)
+    # SUB-GROUP F1: Distribution Matching (KL constraints)
     logvar_core_safe = torch.clamp(logvar_core, min=-30.0, max=20.0)
     kl_per_dim_core = -0.5 * (1 + logvar_core_safe - mu_core.pow(2) - logvar_core_safe.exp())
     kl_core_val = kl_per_dim_core.sum(dim=1).mean()
@@ -360,7 +368,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     kl_detail_val = kl_per_dim_detail.sum(dim=1).mean()
     g_kl_detail = goals.goal(kl_detail_val, 'kl_detail')
 
-    # Direct logvar constraints
+    # Direct logvar constraints - prevent exp(logvar) from exploding to Inf
     logvar_core_mean = logvar_core.mean()
     g_logvar_core = goals.goal(logvar_core_mean, 'logvar_core')
     logvar_detail_mean = logvar_detail.mean()
@@ -368,13 +376,13 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     group_kl = geometric_mean([g_kl_core, g_kl_detail, g_logvar_core, g_logvar_detail])
 
-    # SUB-GROUP F2: STRUCTURE (Independence & Consistency)
-    z_c = z_core - z_core.mean(0, keepdim=True)
-    cov = (z_c.T @ z_c) / (B - 1 + 1e-2)
+    # SUB-GROUP F2: Independence & Consistency
+    z_c = z_core - z_core.mean(0, keepdim=True)  # No clamp on z
+    cov = (z_c.T @ z_c) / (B - 1 + 1e-2)  # Larger epsilon to prevent gradient explosion
     diag = torch.diag(cov) + 1e-2
+    # Clamp denominator to prevent division by near-zero causing huge gradients
     cov_penalty = (cov.pow(2).sum() - diag.pow(2).sum()) / torch.clamp(diag.pow(2).sum(), min=1e-1)
     g_cov = goals.goal(cov_penalty, 'cov')
-
     g_weak = goals.goal((mu_core.var(0) < 0.1).float().mean(), 'weak')
 
     if x_aug is not None:
@@ -388,27 +396,33 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     group_structure = geometric_mean([g_cov, g_weak, g_consistency])
 
-    # SUB-GROUP F3: CAPACITY (Dimension Utilization)
-    core_var_per_dim = mu_core.var(0)
+    # SUB-GROUP F3: Dimension Capacity Utilization (NEW!)
+    # Compute active and effective dimensions
+    core_var_per_dim = mu_core.var(0)  # Variance across batch for each dim
     detail_var_per_dim = mu_detail.var(0)
 
+    # Active dimensions (variance > threshold)
     core_active_count = (core_var_per_dim > 0.1).float().sum()
     detail_active_count = (detail_var_per_dim > 0.1).float().sum()
-    total_dims = float(mu_core.shape[1])
+    total_dims = float(mu_core.shape[1])  # 64
 
+    # Inactive ratio (want to minimize - fewer inactive dims is better)
     core_inactive_ratio = (total_dims - core_active_count) / total_dims
     detail_inactive_ratio = (total_dims - detail_active_count) / total_dims
     g_core_active = goals.goal(core_inactive_ratio, 'core_active')
     g_detail_active = goals.goal(detail_inactive_ratio, 'detail_active')
 
     # Effective dimensions (exponential of entropy)
+    # Clamp to prevent log(0) which causes -inf and huge gradients
     core_var_norm = core_var_per_dim / (core_var_per_dim.sum() + 1e-2) + 1e-2
     detail_var_norm = detail_var_per_dim / (detail_var_per_dim.sum() + 1e-2) + 1e-2
+    # Clamp inputs to log() to prevent extreme gradients
     core_var_norm_safe = torch.clamp(core_var_norm, min=1e-2, max=1.0)
     detail_var_norm_safe = torch.clamp(detail_var_norm, min=1e-2, max=1.0)
     core_effective = torch.exp(-torch.sum(core_var_norm_safe * torch.log(core_var_norm_safe)))
     detail_effective = torch.exp(-torch.sum(detail_var_norm_safe * torch.log(detail_var_norm_safe)))
 
+    # Ineffective ratio (want to minimize - higher effective dims is better)
     core_ineffective_ratio = (total_dims - core_effective) / total_dims
     detail_ineffective_ratio = (total_dims - detail_effective) / total_dims
     g_core_effective = goals.goal(core_ineffective_ratio, 'core_effective')
@@ -416,50 +430,51 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     group_capacity = geometric_mean([g_core_active, g_detail_active, g_core_effective, g_detail_effective])
 
-    # SUB-GROUP F4: DETAIL STATS
+    # SUB-GROUP F4: Detail Statistics
     detail_mean_val = mu_detail.mean(0).abs().mean()
     g_detail_mean = goals.goal(detail_mean_val, 'detail_mean')
 
     detail_var_mean_val = mu_detail.var(0).mean()
     g_detail_var_mean = goals.goal(detail_var_mean_val, 'detail_var_mean')
 
-    z_d = z_detail - z_detail.mean(0, keepdim=True)
-    cov_d = (z_d.T @ z_d) / (B - 1 + 1e-2)
+    z_d = z_detail - z_detail.mean(0, keepdim=True)  # No clamp on z
+    cov_d = (z_d.T @ z_d) / (B - 1 + 1e-2)  # Larger epsilon to prevent gradient explosion
     diag_d = torch.diag(cov_d) + 1e-2
+    # Clamp denominator to prevent division by near-zero causing huge gradients
     detail_cov_penalty = (cov_d.pow(2).sum() - diag_d.pow(2).sum()) / torch.clamp(diag_d.pow(2).sum(), min=1e-1)
     g_detail_cov = goals.goal(detail_cov_penalty, 'detail_cov')
 
-    group_detail_stats = geometric_mean([g_detail_mean, g_detail_var_mean, g_detail_cov, g_traversal])
+    group_detail_stats = geometric_mean([g_detail_mean, g_detail_var_mean, g_detail_cov])
 
-    # ========== GROUP G: HEALTH ==========
-    # Variance statistics
+    # GROUP F: HEALTH
     detail_contrib = (recon - recon_core).abs().mean()
+    # Larger epsilon to prevent gradient explosion when recon_core magnitude is small
     detail_ratio = detail_contrib / torch.clamp(recon_core.abs().mean(), min=1e-2)
     g_detail_ratio = goals.goal(detail_ratio, 'detail_ratio')
 
-    core_var_median = mu_core.var(0).median()
-    detail_var_median = mu_detail.var(0).median()
+    core_var_median, detail_var_median = mu_core.var(0).median(), mu_detail.var(0).median()
     g_core_var = goals.goal(core_var_median, 'core_var_health')
     g_detail_var = goals.goal(detail_var_median, 'detail_var_health')
 
-    core_var_max = mu_core.var(0).max()
-    detail_var_max = mu_detail.var(0).max()
+    core_var_max, detail_var_max = mu_core.var(0).max(), mu_detail.var(0).max()
     g_core_var_max = goals.goal(core_var_max, 'core_var_max')
     g_detail_var_max = goals.goal(detail_var_max, 'detail_var_max')
 
-    # ========== AGGREGATE GROUPS ==========
+    # GROUPED BOM - v15: Hierarchical latent group with capacity enforcement
+    # LBO Directive #3: No clamping - all groups must be allowed to reach their natural values
+    # If any group → 0, the system WILL crash, triggering Directive #4 rollback
     group_recon = geometric_mean([g_pixel, g_edge, g_perceptual])
     group_core = geometric_mean([g_core_mse, g_core_edge])
     group_swap = geometric_mean([g_swap_structure, g_swap_appearance, g_swap_color_hist])
     group_realism = geometric_mean([g_realism_recon, g_realism_swap])
     group_disentangle = geometric_mean([g_core_color_leak, g_detail_edge_leak])
+    # HIERARCHICAL: 4 sub-groups (KL, structure, capacity, detail_stats) → latent
     group_latent = geometric_mean([group_kl, group_structure, group_capacity, group_detail_stats])
     group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var, g_core_var_max, g_detail_var_max])
 
     groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_disentangle, group_latent, group_health])
-
-    # ========== CHECK FOR NaN/Inf ==========
     if torch.isnan(groups).any() or torch.isinf(groups).any():
+        # DIAGNOSTIC: Show which groups have NaN/Inf
         group_status = []
         for i, (name, g) in enumerate(zip(group_names, groups)):
             if torch.isnan(g):
@@ -469,24 +484,23 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         print(f"    [NaN/Inf DETECTED] {', '.join(group_status)}")
         return None
 
-    # ========== LBO LOSS ==========
-    # Directive #1: Pure min() barrier (NO softmin)
+    # LBO Directive #1: Pure min() barrier (no softmin - violates LBO)
     min_group = groups.min()
     min_group_idx = groups.argmin()
 
-    # Directive #4: Discrete rollback if S_min ≤ 0
+    # LBO Directive #4: Reject S_min ≤ 0 BEFORE log calculation to prevent crash
     if min_group <= 0:
+        # DIAGNOSTIC: Show which group failed and by how much
         group_name = group_names[min_group_idx] if min_group_idx < len(group_names) else f"group_{min_group_idx}"
         print(f"    [LBO BARRIER] Group '{group_name}' failed: S_min = {min_group:.6f}")
-        return None
+        return None  # Trigger rollback - constraint violated
 
-    # Directive #1: Pure log barrier (NO epsilon)
+    # LBO Directive #1: Pure log barrier, NO EPSILON!
     loss = -torch.log(min_group)
     if torch.isnan(loss):
         print(f"    [LOSS NaN] -log({min_group:.6f}) = NaN")
         return None
 
-    # ========== RETURN RESULTS ==========
     individual_goals = {
         'pixel': g_pixel.item(), 'edge': g_edge.item(), 'perceptual': g_perceptual.item(),
         'core_mse': g_core_mse.item(), 'core_edge': g_core_edge.item(),
@@ -532,10 +546,10 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'detail_mean_raw': detail_mean_val.item(), 'detail_var_mean_raw': detail_var_mean_val.item(),
         'detail_cov_raw': detail_cov_penalty.item(),
     }
-
+    
     return {
         'loss': loss, 'groups': groups, 'min_idx': min_group_idx,
         'group_values': group_values, 'individual_goals': individual_goals,
         'raw_values': raw_values, 'ssim': ssim_val.item(),
-        'mse': pixel_mse.item(), 'edge_loss': F.mse_loss(edges(recon), edges_x).item(),
+        'mse': pixel_mse.item(), 'edge_loss': edge_loss.item(),
     }

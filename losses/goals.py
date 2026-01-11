@@ -86,19 +86,26 @@ class GoalSystem:
                     min_val = np.min(self.samples[name])
                     max_val = np.max(self.samples[name])
                     mean_val = np.mean(self.samples[name])
-                    # Use max if median is near zero (prevents over-sensitivity)
+                    percentile_95 = np.percentile(self.samples[name], 95)
+
+                    # LBO Constitution: "START WIDE, SQUEEZE LATER"
+                    # Use max(95th percentile, mean) to handle outliers while staying robust
                     # Minimum scale 5e-4 to prevent numerical instability
                     if median < 1e-4:
+                        # Near-zero median: use max to contain all values
                         self.scales[name] = max(max_val, 5e-4)
                     else:
-                        self.scales[name] = max(median, 5e-4)
+                        # Use 95th percentile or mean (whichever is larger) to handle high-variance metrics
+                        # This prevents calibration→crash from outliers (e.g., consistency: median=7.5, max=222)
+                        robust_scale = max(percentile_95, mean_val)
+                        self.scales[name] = max(robust_scale, 5e-4)
 
                     # Apply epoch 1 safety margin
                     self.scales[name] *= epoch1_margin
 
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
                     margin_note = " (+10% margin)" if epoch == 1 else ""
-                    print(f"  {name:20s}: scale={self.scales[name]:.4f}{margin_note} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
+                    print(f"  {name:20s}: scale={self.scales[name]:.4f}{margin_note} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f} p95={percentile_95:.4f}")
                 else:
                     self.scales[name] = 1.0 * epoch1_margin
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
@@ -112,7 +119,8 @@ class GoalSystem:
                     max_val = np.max(self.samples[name])
                     mean_val = np.mean(self.samples[name])
                     median = np.median(self.samples[name])
-                    print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed) | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
+                    percentile_95 = np.percentile(self.samples[name], 95)
+                    print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed) | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f} p95={percentile_95:.4f}")
                 else:
                     print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed)")
             elif ctype == ConstraintType.BOX:

@@ -274,6 +274,12 @@ for epoch in range(1, EPOCHS + 1):
 
         optimizer.zero_grad(set_to_none=True)
         recon, mu, logvar, z = model(x)
+        if not all([check_tensor(t) for t in [recon, mu, logvar, z]]):
+            print(f"    [FORWARD FAILURE] Bad tensors: "
+                  f"{', '.join(name for name, t in [('recon', recon), ('mu', mu), ('logvar', logvar), ('z', z)] if not check_tensor(t))}")
+            optimizer.zero_grad(set_to_none=True)
+            skip_count += 1
+            continue
         
         # v14: Train discriminator first
         if goal_system.calibrated and batch_idx % 2 == 0:  # Train D every other step
@@ -287,11 +293,25 @@ for epoch in range(1, EPOCHS + 1):
             # Fake images (recon) should get score 0
             with torch.no_grad():
                 recon_for_d = model(x)[0].detach()
+            if not check_tensor(recon_for_d):
+                print("    [DISCRIMINATOR SKIP] recon_for_d contains NaN/Inf")
+                optimizer_d.zero_grad(set_to_none=True)
+                skip_count += 1
+                continue
             d_fake = discriminator(recon_for_d)
             loss_d_fake = F.binary_cross_entropy_with_logits(d_fake, torch.zeros_like(d_fake))
 
             loss_d = (loss_d_real + loss_d_fake) / 2
             loss_d.backward()
+            bad_grad = any(
+                p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
+                for p in discriminator.parameters()
+            )
+            if bad_grad:
+                print("    [DISCRIMINATOR SKIP] NaN/Inf gradients detected")
+                optimizer_d.zero_grad(set_to_none=True)
+                skip_count += 1
+                continue
             torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
             optimizer_d.step()
 
@@ -301,6 +321,15 @@ for epoch in range(1, EPOCHS + 1):
                 goal_system.collect(raw)
             if not goal_system.calibrated:
                 F.mse_loss(recon, x).backward()
+                bad_grad = any(
+                    p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
+                    for p in model.parameters()
+                )
+                if bad_grad:
+                    print("    [CALIBRATION SKIP] NaN/Inf gradients detected")
+                    optimizer.zero_grad(set_to_none=True)
+                    skip_count += 1
+                    continue
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 pbar.set_postfix({'phase': 'CALIBRATING'})
@@ -340,7 +369,41 @@ for epoch in range(1, EPOCHS + 1):
             print(f"loss value: {loss.item()}")
             raise RuntimeError("BOM barrier violation - loss is NaN/Inf")
 
+        min_group = result['groups'].min().item()
+        if min_group < MIN_GROUP_GRAD_THRESHOLD:
+            skip_count += 1
+            optimizer.zero_grad(set_to_none=True)
+            consecutive_rollbacks += 1
+            if consecutive_rollbacks == 1:
+                # First rollback - print full diagnostics
+                print_rollback_diagnostics(epoch, batch_idx, result, model, loss,
+                                          failure_reason=f"S_min={min_group:.6f} < {MIN_GROUP_GRAD_THRESHOLD:.1e} (grad safety threshold)")
+                first_rollback_info = {'batch': batch_idx, 'count': 1}
+            elif consecutive_rollbacks % 10 == 0:
+                print(f"    ... {consecutive_rollbacks} consecutive rollbacks (since batch {first_rollback_info['batch']})")
+
+            # HALT after 5 consecutive rollbacks to prevent infinite loop
+            if consecutive_rollbacks >= 5:
+                print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive rollbacks detected")
+                print(f"   This indicates S_min is consistently too small for safe gradients")
+                print(f"   Review the diagnostics above to identify which constraints are too tight")
+                print(f"   Possible fixes:")
+                print(f"     1. Widen BOX constraints or increase auto-scale percentiles")
+                print(f"     2. Reduce learning rate (current: {LEARNING_RATE})")
+                print(f"     3. Increase MIN_GROUP_GRAD_THRESHOLD (current: {MIN_GROUP_GRAD_THRESHOLD:.1e})")
+                raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive rollbacks")
+
+            continue
+
         loss.backward()
+        bad_grad = any(
+            p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
+            for p in model.parameters()
+        )
+        if bad_grad:
+            print("    [STEP SKIP] NaN/Inf gradients detected")
+            optimizer.zero_grad(set_to_none=True)
+            skip_count += 1
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
             skip_count += 1

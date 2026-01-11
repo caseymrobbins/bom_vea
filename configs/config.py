@@ -22,6 +22,7 @@ LEARNING_RATE_D = 3e-4  # Discriminator learning rate (10x slower than main, mai
 WEIGHT_DECAY = 1e-5
 CALIBRATION_BATCHES = 200
 MAX_GRAD_NORM = 1.0
+MIN_GROUP_GRAD_THRESHOLD = 1e-6  # Skip backward if S_min too small (avoids non-finite grads)
 
 # Model
 LATENT_DIM = 128

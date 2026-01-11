@@ -380,10 +380,25 @@ for epoch in range(1, EPOCHS + 1):
                                           failure_reason=f"S_min={min_group:.6f} < {MIN_GROUP_GRAD_THRESHOLD:.1e} (grad safety threshold)")
                 first_rollback_info = {'batch': batch_idx, 'count': 1}
             elif consecutive_rollbacks % 10 == 0:
-                print(f"    ... {consecutive_rollbacks} consecutive rollbacks (since batch {first_rollback_info['batch']})")
+                # Every 10th - show condensed goal scores
+                print(f"\n📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): S_min={min_group:.6f} < threshold")
+                gv = result.get('group_values', {})
+                if gv:
+                    print("   Groups: " + ", ".join(f"{n}={v:.4f}" for n, v in sorted(gv.items(), key=lambda x: x[1])[:7]))
+                ig = result.get('individual_goals', {})
+                raw = result.get('raw_values', {})
+                if ig:
+                    worst_5 = sorted(ig.items(), key=lambda x: x[1])[:5]
+                    for name, score in worst_5:
+                        raw_key = name if name in raw else f"{name}_raw"
+                        raw_val = raw.get(raw_key, "N/A")
+                        if isinstance(raw_val, (int, float)):
+                            print(f"      {name:20s}: score={score:.6f}  raw={raw_val:10.4f}")
+                        else:
+                            print(f"      {name:20s}: score={score:.6f}")
 
-            # HALT after 5 consecutive rollbacks to prevent infinite loop
-            if consecutive_rollbacks >= 5:
+            # HALT after 100 consecutive rollbacks (was 5)
+            if consecutive_rollbacks >= 100:
                 print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive rollbacks detected")
                 print(f"   This indicates S_min is consistently too small for safe gradients")
                 print(f"   Review the diagnostics above to identify which constraints are too tight")
@@ -409,11 +424,27 @@ for epoch in range(1, EPOCHS + 1):
                 print_rollback_diagnostics(epoch, batch_idx, result, model, loss,
                                           failure_reason="NaN/Inf gradients detected BEFORE grad clipping (bad_grad check)")
                 first_rollback_info = {'batch': batch_idx, 'count': 1}
-            elif consecutive_rollbacks % 50 == 0:
-                print(f"    ... {consecutive_rollbacks} consecutive skips (since batch {first_rollback_info['batch']})")
+            elif consecutive_rollbacks % 10 == 0:
+                # Every 10th skip - show condensed goal scores
+                print(f"\n📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): Loss={loss.item():.4f}, S_min={result['groups'].min().item():.6f}")
+                gv = result.get('group_values', {})
+                if gv:
+                    print("   Groups: " + ", ".join(f"{n}={v:.4f}" for n, v in sorted(gv.items(), key=lambda x: x[1])[:7]))
+                # Show worst 5 individual goals
+                ig = result.get('individual_goals', {})
+                raw = result.get('raw_values', {})
+                if ig:
+                    worst_5 = sorted(ig.items(), key=lambda x: x[1])[:5]
+                    for name, score in worst_5:
+                        raw_key = name if name in raw else f"{name}_raw"
+                        raw_val = raw.get(raw_key, "N/A")
+                        if isinstance(raw_val, (int, float)):
+                            print(f"      {name:20s}: score={score:.6f}  raw={raw_val:10.4f}")
+                        else:
+                            print(f"      {name:20s}: score={score:.6f}")
 
-            # HALT after 5 consecutive skips
-            if consecutive_rollbacks >= 5:
+            # HALT after 100 consecutive skips (was 5)
+            if consecutive_rollbacks >= 100:
                 print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive gradient skips detected")
                 print(f"   This indicates gradients are consistently NaN/Inf BEFORE clipping")
                 print(f"   Review the diagnostics above - likely causes:")
@@ -421,6 +452,7 @@ for epoch in range(1, EPOCHS + 1):
                 print(f"     2. Z values exploding (check reparameterize)")
                 print(f"     3. Decoder producing extreme outputs")
                 print(f"     4. Loss computation numerical instability")
+                print(f"     5. BOX constraints too tight (values at boundaries)")
                 raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive gradient skips")
 
             optimizer.zero_grad(set_to_none=True)
@@ -438,10 +470,25 @@ for epoch in range(1, EPOCHS + 1):
                                           failure_reason="Non-finite gradients after backward()")
                 first_rollback_info = {'batch': batch_idx, 'count': 1}
             elif consecutive_rollbacks % 10 == 0:
-                print(f"    ... {consecutive_rollbacks} consecutive rollbacks (since batch {first_rollback_info['batch']})")
+                # Every 10th - show condensed goal scores
+                print(f"\n📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): grad_norm=nan/inf")
+                gv = result.get('group_values', {})
+                if gv:
+                    print("   Groups: " + ", ".join(f"{n}={v:.4f}" for n, v in sorted(gv.items(), key=lambda x: x[1])[:7]))
+                ig = result.get('individual_goals', {})
+                raw = result.get('raw_values', {})
+                if ig:
+                    worst_5 = sorted(ig.items(), key=lambda x: x[1])[:5]
+                    for name, score in worst_5:
+                        raw_key = name if name in raw else f"{name}_raw"
+                        raw_val = raw.get(raw_key, "N/A")
+                        if isinstance(raw_val, (int, float)):
+                            print(f"      {name:20s}: score={score:.6f}  raw={raw_val:10.4f}")
+                        else:
+                            print(f"      {name:20s}: score={score:.6f}")
 
-            # HALT after 5 consecutive rollbacks to prevent infinite loop
-            if consecutive_rollbacks >= 5:
+            # HALT after 100 consecutive rollbacks (was 5)
+            if consecutive_rollbacks >= 100:
                 print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive rollbacks detected")
                 print(f"   This indicates a fundamental issue with loss computation or gradients")
                 print(f"   Review the diagnostics above to identify the problem")
@@ -517,11 +564,28 @@ for epoch in range(1, EPOCHS + 1):
                     first_rollback_info = {'batch': batch_idx, 'count': 1}
 
                 elif consecutive_rollbacks % 10 == 0:
-                    # Every 10th consecutive rollback, show count
-                    print(f"    ... {consecutive_rollbacks} consecutive rollbacks (since batch {first_rollback_info['batch']})")
+                    # Every 10th - show condensed goal scores
+                    if check_result is not None:
+                        print(f"\n📊 ROLLBACK #{consecutive_rollbacks} (Batch {batch_idx}): Post-step violation")
+                        gv = check_result.get('group_values', {})
+                        if gv:
+                            print("   Groups: " + ", ".join(f"{n}={v:.4f}" for n, v in sorted(gv.items(), key=lambda x: x[1])[:7]))
+                        ig = check_result.get('individual_goals', {})
+                        raw = check_result.get('raw_values', {})
+                        if ig:
+                            worst_5 = sorted(ig.items(), key=lambda x: x[1])[:5]
+                            for name, score in worst_5:
+                                raw_key = name if name in raw else f"{name}_raw"
+                                raw_val = raw.get(raw_key, "N/A")
+                                if isinstance(raw_val, (int, float)):
+                                    print(f"      {name:20s}: score={score:.6f}  raw={raw_val:10.4f}")
+                                else:
+                                    print(f"      {name:20s}: score={score:.6f}")
+                    else:
+                        print(f"    ... {consecutive_rollbacks} consecutive rollbacks (check_result=None)")
 
-                # HALT after 5 consecutive rollbacks to prevent infinite loop
-                if consecutive_rollbacks >= 5:
+                # HALT after 100 consecutive rollbacks (was 5)
+                if consecutive_rollbacks >= 100:
                     print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive rollbacks detected")
                     print(f"   This indicates optimizer updates are consistently violating constraints")
                     print(f"   Review the diagnostics above to identify which constraints are failing")

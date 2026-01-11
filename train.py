@@ -295,6 +295,24 @@ for epoch in range(1, EPOCHS + 1):
             print(f"loss value: {loss.item()}")
             raise RuntimeError("BOM barrier violation - loss is NaN/Inf")
 
+        min_group = result['groups'].min().item()
+        if min_group < MIN_GROUP_GRAD_THRESHOLD:
+            skip_count += 1
+            optimizer.zero_grad(set_to_none=True)
+            consecutive_rollbacks += 1
+            if consecutive_rollbacks == 1:
+                first_rollback_info = {
+                    'batch': batch_idx,
+                    'min_group': min_group,
+                    'failed': f"S_min < {MIN_GROUP_GRAD_THRESHOLD:.1e} (grad safety)"
+                }
+                print(f"\n⚠️  [ROLLBACK] Epoch {epoch}, Batch {batch_idx}")
+                print(f"    S_min = {first_rollback_info['min_group']:.6f}")
+                print(f"    Failed: {first_rollback_info['failed']}")
+            elif consecutive_rollbacks % 10 == 0:
+                print(f"    ... {consecutive_rollbacks} consecutive rollbacks (since batch {first_rollback_info['batch']})")
+            continue
+
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
@@ -304,7 +322,7 @@ for epoch in range(1, EPOCHS + 1):
             if consecutive_rollbacks == 1:
                 first_rollback_info = {
                     'batch': batch_idx,
-                    'min_group': 0.0,
+                    'min_group': min_group,
                     'failed': 'Non-finite gradients'
                 }
                 print(f"\n⚠️  [ROLLBACK] Epoch {epoch}, Batch {batch_idx}")

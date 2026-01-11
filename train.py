@@ -312,7 +312,7 @@ for epoch in range(1, EPOCHS + 1):
                 optimizer_d.zero_grad(set_to_none=True)
                 skip_count += 1
                 continue
-            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
+            # No gradient clipping - external constraint
             optimizer_d.step()
 
         if needs_recal and batch_idx < CALIBRATION_BATCHES:
@@ -330,7 +330,7 @@ for epoch in range(1, EPOCHS + 1):
                     optimizer.zero_grad(set_to_none=True)
                     skip_count += 1
                     continue
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # No gradient clipping - external constraint
                 optimizer.step()
                 pbar.set_postfix({'phase': 'CALIBRATING'})
                 continue
@@ -419,8 +419,8 @@ for epoch in range(1, EPOCHS + 1):
             continue
 
         # If we get here, s_min > 0, safe to proceed with backward/step
+        # LBO: No gradient clipping - that would be an external constraint
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
         optimizer.step()
 
         # Successful step - reset consecutive counter

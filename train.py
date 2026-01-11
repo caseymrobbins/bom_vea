@@ -291,14 +291,14 @@ for epoch in range(1, EPOCHS + 1):
             loss_d_real = F.binary_cross_entropy_with_logits(d_real, torch.ones_like(d_real))
 
             # Fake images (recon) should get score 0
-            with torch.no_grad():
-                recon_for_d = model(x)[0].detach()
-            if not check_tensor(recon_for_d):
-                print("    [DISCRIMINATOR SKIP] recon_for_d contains NaN/Inf")
+            # IMPORTANT: Reuse already-computed recon instead of model(x)[0]
+            # to avoid extra forward pass that mutates BatchNorm stats between forward/backward
+            if not check_tensor(recon):
+                print("    [DISCRIMINATOR SKIP] recon contains NaN/Inf")
                 optimizer_d.zero_grad(set_to_none=True)
                 skip_count += 1
                 continue
-            d_fake = discriminator(recon_for_d)
+            d_fake = discriminator(recon.detach())
             loss_d_fake = F.binary_cross_entropy_with_logits(d_fake, torch.zeros_like(d_fake))
 
             loss_d = (loss_d_real + loss_d_fake) / 2
@@ -342,6 +342,32 @@ for epoch in range(1, EPOCHS + 1):
 
         result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
 
+        # SINGLE SKIP DECISION POINT: Check result validity BEFORE dereferencing
+        # Fix: Check result is None BEFORE accessing result['loss']
+        if result is None:
+            skip_count += 1
+            optimizer.zero_grad(set_to_none=True)
+            consecutive_rollbacks += 1
+
+            if consecutive_rollbacks == 1:
+                print_rollback_diagnostics(epoch, batch_idx, None, model, None,
+                                          failure_reason="Loss computation returned None (constraint violated)")
+                first_rollback_info = {'batch': batch_idx, 'count': 1}
+            elif consecutive_rollbacks % 10 == 0:
+                print(f"\n📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): Loss computation returned None")
+
+            if consecutive_rollbacks >= 100:
+                print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive skips (loss returned None)")
+                print(f"   grouped_bom_loss consistently returns None")
+                print(f"   This means constraints are violated before loss can be computed")
+                raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive None results")
+
+            continue
+
+        # Now safe to dereference result
+        loss = result['loss']
+        min_group = result['groups'].min().item()
+
         # v16: Debug output for raw and normalized values (once per epoch)
         if DEBUG_RAW_NORMALIZED and batch_idx == 0 and epoch >= 2 and goal_system.calibrated:
             print(f"\n🔍 DEBUG: Raw vs Normalized Values (Epoch {epoch}, Batch {batch_idx})")
@@ -356,14 +382,8 @@ for epoch in range(1, EPOCHS + 1):
                     print(f"  {goal_name:20s} | Raw: {raw:10.6f} → Normalized: {norm:6.4f}")
             print("-" * 100 + "\n")
 
-        # SINGLE SKIP DECISION POINT: Check result validity BEFORE calling log(min())
-        # If s_min <= 0, skip immediately without backward/step
-        loss = result['loss']
-        min_group = result['groups'].min().item()
-
-        # Skip conditions: result invalid OR s_min too small
+        # Check remaining skip conditions
         should_skip = (
-            result is None or
             torch.isnan(loss) or
             torch.isinf(loss) or
             min_group <= 0
@@ -376,9 +396,7 @@ for epoch in range(1, EPOCHS + 1):
 
             if consecutive_rollbacks == 1:
                 # First skip - print full diagnostics
-                if result is None:
-                    failure_reason = "Loss computation returned None"
-                elif torch.isnan(loss):
+                if torch.isnan(loss):
                     failure_reason = "Loss is NaN"
                 elif torch.isinf(loss):
                     failure_reason = "Loss is Inf"

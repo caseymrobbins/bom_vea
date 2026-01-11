@@ -50,6 +50,78 @@ split_idx = LATENT_DIM // 2
 # Augmentation for consistency loss - batched on GPU
 import torchvision.transforms as T
 
+def diagnose_gradient_source(model, result, optimizer):
+    """Identify which specific loss term causes NaN/Inf gradients.
+
+    Tests backward pass on each loss component individually to pinpoint the exact source of gradient failure.
+    """
+    if result is None or 'raw_values' not in result:
+        print("⚠️  Cannot diagnose: result is None or missing raw_values")
+        return
+
+    print("\n" + "="*100)
+    print("🔬 GRADIENT SOURCE DIAGNOSTIC - Testing each loss term individually")
+    print("="*100)
+
+    raw_values = result['raw_values']
+    individual_goals = result.get('individual_goals', {})
+
+    problematic_terms = []
+
+    # Test each loss term that has both raw value and goal score
+    for name in sorted(raw_values.keys()):
+        if name not in individual_goals:
+            continue
+
+        raw_val = raw_values[name]
+        goal_score = individual_goals[name]
+
+        # Skip if not a tensor
+        if not isinstance(raw_val, torch.Tensor) or not isinstance(goal_score, torch.Tensor):
+            continue
+
+        # Zero gradients before testing this term
+        optimizer.zero_grad(set_to_none=True)
+
+        # Try backward on just this term's goal score (simulate single-term loss)
+        # Use -log to simulate LBO loss computation
+        try:
+            test_loss = -torch.log(torch.clamp(goal_score, min=1e-10))
+            test_loss.backward(retain_graph=True)
+
+            # Check if this term causes bad gradients
+            has_bad_grad = False
+            max_grad_norm = 0.0
+            for param in model.parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        has_bad_grad = True
+                        break
+                    max_grad_norm = max(max_grad_norm, param.grad.abs().max().item())
+
+            if has_bad_grad or max_grad_norm > 1000:
+                status = "🔴 NaN/Inf" if has_bad_grad else f"⚠️  Large ({max_grad_norm:.1e})"
+                problematic_terms.append((name, raw_val.item(), goal_score.item(), status))
+                print(f"  {status} {name:20s}: raw={raw_val.item():10.4f}, goal={goal_score.item():.6f}")
+
+        except Exception as e:
+            print(f"  ❌ {name:20s}: Exception during backward: {str(e)[:50]}")
+            problematic_terms.append((name, raw_val.item(), goal_score.item(), f"Exception: {str(e)[:30]}"))
+
+    # Clear gradients after diagnostic
+    optimizer.zero_grad(set_to_none=True)
+
+    if problematic_terms:
+        print(f"\n🎯 IDENTIFIED {len(problematic_terms)} PROBLEMATIC LOSS TERM(S)")
+        print("   These terms cause gradient explosion when computed individually:")
+        for name, raw, goal, status in problematic_terms:
+            print(f"     {name}: {status}")
+    else:
+        print("\n✅ No individual term causes bad gradients")
+        print("   The problem may be in the combination/aggregation of terms")
+
+    print("="*100 + "\n")
+
 def print_rollback_diagnostics(epoch, batch_idx, result, model, loss=None, grad_norm=None, failure_reason="Unknown"):
     """Print comprehensive diagnostics when a rollback occurs."""
     print("\n" + "="*100)
@@ -320,7 +392,17 @@ for epoch in range(1, EPOCHS + 1):
                 raw = compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discriminator, x_aug)
                 goal_system.collect(raw)
             if not goal_system.calibrated:
-                F.mse_loss(recon, x).backward()
+                # LBO FIX: Use actual LBO loss during calibration, not MSE
+                # This ensures calibration sees the same optimization dynamics as training
+                cal_result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
+
+                if cal_result is None or cal_result['groups'].min() <= 0:
+                    print(f"    [CALIBRATION SKIP] Invalid LBO result at batch {batch_idx}")
+                    optimizer.zero_grad(set_to_none=True)
+                    skip_count += 1
+                    continue
+
+                cal_result['loss'].backward()
                 bad_grad = any(
                     p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
                     for p in model.parameters()
@@ -332,7 +414,7 @@ for epoch in range(1, EPOCHS + 1):
                     continue
                 # No gradient clipping - external constraint
                 optimizer.step()
-                pbar.set_postfix({'phase': 'CALIBRATING'})
+                pbar.set_postfix({'phase': 'CALIBRATING', 'loss': f"{cal_result['loss'].item():.2f}"})
                 continue
 
         if needs_recal and batch_idx == CALIBRATION_BATCHES:
@@ -463,12 +545,17 @@ for epoch in range(1, EPOCHS + 1):
                 for name, norm, has_nan, has_inf in bad_grad_info[:10]:  # Show first 10
                     print(f"     {name}: has_nan={has_nan}, has_inf={has_inf}, norm={norm:.6f}")
 
-            optimizer.zero_grad(set_to_none=True)
-
             if consecutive_rollbacks == 1:
+                # First gradient failure - run comprehensive diagnostics
                 print_rollback_diagnostics(epoch, batch_idx, result, model, loss,
                                           failure_reason=f"NaN/Inf gradients in {len(bad_grad_info)} parameters after backward")
+
+                # Identify which specific loss term causes the gradient explosion
+                print("\n🔍 Running per-term gradient diagnostic to identify exact failure source...")
+                diagnose_gradient_source(model, result, optimizer)
+
                 first_rollback_info = {'batch': batch_idx, 'count': 1}
+
             elif consecutive_rollbacks % 10 == 0:
                 print(f"📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): Bad gradients in {len(bad_grad_info)} parameters")
                 gv = result.get('group_values', {})
@@ -485,6 +572,9 @@ for epoch in range(1, EPOCHS + 1):
                             print(f"      {name:20s}: score={score:.6f}  raw={raw_val:10.4f}")
                         else:
                             print(f"      {name:20s}: score={score:.6f}")
+
+            # Clear invalid gradients before continuing
+            optimizer.zero_grad(set_to_none=True)
 
             if consecutive_rollbacks >= 100:
                 print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive gradient failures")

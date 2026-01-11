@@ -118,7 +118,9 @@ GOAL_SPECS = {
     'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # Health group - v17: WIDER variance bounds to allow latent space spreading
-    'detail_ratio': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 1.00},  # v17f: Widened 0.70→1.00 (saw 0.69 at boundary)
+    # detail_ratio: Changed from BOX to MINIMIZE_SOFT - we don't need upper bound
+    # Raw values reach 0.97-0.99, BOX upper=1.0 causes gradient explosion at boundary
+    'detail_ratio': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 1200.0},  # v17: Doubled again (600→1200)
     'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 1200.0},  # v17: Allow 2x spreading vs v16
     'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # v17g: Fixed scale=100.0 → auto (calibration saw p95≈494)

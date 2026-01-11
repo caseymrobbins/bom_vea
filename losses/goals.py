@@ -255,10 +255,23 @@ def geometric_mean(goals):
     This prevents:
     - Underflow: (1e-10)^30 = 1e-300 → 0 in float32
     - Overflow: (100)^30 = 1e60 → Inf in float32
+
+    LBO COMPLIANCE (Directive #4):
+    - NO CLAMP! If any goal ≤ 0, this returns 0 to trigger discrete rollback
+    - Clamping would artificially inflate failed constraints, preventing rollback
     """
     goals = torch.stack(goals)
-    # Clamp to prevent log(0) = -inf
-    goals = torch.clamp(goals, min=1e-10)
+
+    # LBO: NO CLAMP - let goals naturally reach 0 to trigger rollback
+    # Check if any goal is ≤ 0 BEFORE log (discrete rollback)
+    if (goals <= 0).any():
+        return torch.tensor(0.0, device=goals.device, requires_grad=True)
+
     # Compute geometric mean in log space: exp(mean(log(goals)))
     log_goals = torch.log(goals)
+
+    # Check for -inf from log() of very small positive values
+    if torch.isinf(log_goals).any():
+        return torch.tensor(0.0, device=goals.device, requires_grad=True)
+
     return torch.exp(log_goals.mean())

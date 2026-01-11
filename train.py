@@ -419,8 +419,50 @@ for epoch in range(1, EPOCHS + 1):
             continue
 
         # If we get here, s_min > 0, safe to proceed with backward/step
-        # LBO: No gradient clipping - that would be an external constraint
         loss.backward()
+
+        # Check gradients BEFORE step to prevent weight corruption
+        bad_grad = any(
+            p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
+            for p in model.parameters()
+        )
+
+        if bad_grad:
+            # Gradients are invalid - skip step to protect weights
+            skip_count += 1
+            optimizer.zero_grad(set_to_none=True)
+            consecutive_rollbacks += 1
+
+            if consecutive_rollbacks == 1:
+                print_rollback_diagnostics(epoch, batch_idx, result, model, loss,
+                                          failure_reason="NaN/Inf gradients after backward (preventing weight corruption)")
+                first_rollback_info = {'batch': batch_idx, 'count': 1}
+            elif consecutive_rollbacks % 10 == 0:
+                print(f"\n📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): Bad gradients after backward")
+                gv = result.get('group_values', {})
+                if gv:
+                    print("   Groups: " + ", ".join(f"{n}={v:.4f}" for n, v in sorted(gv.items(), key=lambda x: x[1])[:7]))
+                ig = result.get('individual_goals', {})
+                raw = result.get('raw_values', {})
+                if ig:
+                    worst_5 = sorted(ig.items(), key=lambda x: x[1])[:5]
+                    for name, score in worst_5:
+                        raw_key = name if name in raw else f"{name}_raw"
+                        raw_val = raw.get(raw_key, "N/A")
+                        if isinstance(raw_val, (int, float)):
+                            print(f"      {name:20s}: score={score:.6f}  raw={raw_val:10.4f}")
+                        else:
+                            print(f"      {name:20s}: score={score:.6f}")
+
+            if consecutive_rollbacks >= 100:
+                print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive gradient failures")
+                print(f"   Gradients consistently NaN/Inf after backward despite s_min > 0")
+                print(f"   This indicates loss computation creates valid scores but invalid gradients")
+                raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive gradient failures")
+
+            continue
+
+        # Gradients are valid, safe to step (no clipping - that's an external constraint)
         optimizer.step()
 
         # Successful step - reset consecutive counter

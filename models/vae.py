@@ -68,7 +68,10 @@ class ConvVAE(nn.Module):
         mu = self.mu(h)
         mu = torch.clamp(mu, -50, 50)  # Prevent numerical explosion (BOM goals still enforce actual bounds)
         logvar = self.logvar(h)
-        logvar = torch.clamp(logvar, -10, 10)  # exp(10)=22k is plenty, prevents overflow not BOM violation
+        # CRITICAL: Tighter clamp to prevent gradient explosion
+        # exp(5)=148 std is still huge, but exp(10)=22k → z can be ±500+ → decoder NaN gradients
+        # BOX constraints handle actual bounds, this is just numerical safety
+        logvar = torch.clamp(logvar, -10, 5)  # exp(5/2)≈12 std max, prevents z > ±100
         return mu, logvar
     
     def reparameterize(self, mu, logvar):

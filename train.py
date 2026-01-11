@@ -401,9 +401,31 @@ for epoch in range(1, EPOCHS + 1):
             for p in model.parameters()
         )
         if bad_grad:
-            print("    [STEP SKIP] NaN/Inf gradients detected")
-            optimizer.zero_grad(set_to_none=True)
             skip_count += 1
+            consecutive_rollbacks += 1
+
+            if consecutive_rollbacks == 1:
+                # First skip - print full diagnostics
+                print_rollback_diagnostics(epoch, batch_idx, result, model, loss,
+                                          failure_reason="NaN/Inf gradients detected BEFORE grad clipping (bad_grad check)")
+                first_rollback_info = {'batch': batch_idx, 'count': 1}
+            elif consecutive_rollbacks % 50 == 0:
+                print(f"    ... {consecutive_rollbacks} consecutive skips (since batch {first_rollback_info['batch']})")
+
+            # HALT after 5 consecutive skips
+            if consecutive_rollbacks >= 5:
+                print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive gradient skips detected")
+                print(f"   This indicates gradients are consistently NaN/Inf BEFORE clipping")
+                print(f"   Review the diagnostics above - likely causes:")
+                print(f"     1. Logvar values too large (check encoder logvar clamp)")
+                print(f"     2. Z values exploding (check reparameterize)")
+                print(f"     3. Decoder producing extreme outputs")
+                print(f"     4. Loss computation numerical instability")
+                raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive gradient skips")
+
+            optimizer.zero_grad(set_to_none=True)
+            continue
+
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
         if torch.isnan(grad_norm) or torch.isinf(grad_norm):
             skip_count += 1

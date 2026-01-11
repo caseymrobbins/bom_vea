@@ -440,23 +440,37 @@ for epoch in range(1, EPOCHS + 1):
         loss.backward()
 
         # Check gradients BEFORE step to prevent weight corruption
-        bad_grad = any(
-            p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
-            for p in model.parameters()
-        )
+        # Collect info about which parameters have bad gradients BEFORE clearing
+        bad_grad_info = []
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                has_nan = torch.isnan(param.grad).any().item()
+                has_inf = torch.isinf(param.grad).any().item()
+                if has_nan or has_inf:
+                    grad_norm = param.grad.norm().item() if not (has_nan or has_inf) else float('nan')
+                    bad_grad_info.append((name, grad_norm, has_nan, has_inf))
+
+        bad_grad = len(bad_grad_info) > 0
 
         if bad_grad:
             # Gradients are invalid - skip step to protect weights
             skip_count += 1
-            optimizer.zero_grad(set_to_none=True)
             consecutive_rollbacks += 1
+
+            # Print bad gradient info BEFORE clearing (on first and every 10th)
+            if consecutive_rollbacks == 1 or consecutive_rollbacks % 10 == 0:
+                print(f"\n🔴 BAD GRADIENTS DETECTED (Batch {batch_idx}):")
+                for name, norm, has_nan, has_inf in bad_grad_info[:10]:  # Show first 10
+                    print(f"     {name}: has_nan={has_nan}, has_inf={has_inf}, norm={norm:.6f}")
+
+            optimizer.zero_grad(set_to_none=True)
 
             if consecutive_rollbacks == 1:
                 print_rollback_diagnostics(epoch, batch_idx, result, model, loss,
-                                          failure_reason="NaN/Inf gradients after backward (preventing weight corruption)")
+                                          failure_reason=f"NaN/Inf gradients in {len(bad_grad_info)} parameters after backward")
                 first_rollback_info = {'batch': batch_idx, 'count': 1}
             elif consecutive_rollbacks % 10 == 0:
-                print(f"\n📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): Bad gradients after backward")
+                print(f"📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): Bad gradients in {len(bad_grad_info)} parameters")
                 gv = result.get('group_values', {})
                 if gv:
                     print("   Groups: " + ", ".join(f"{n}={v:.4f}" for n, v in sorted(gv.items(), key=lambda x: x[1])[:7]))

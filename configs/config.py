@@ -17,8 +17,8 @@ USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during ba
 # Training
 EPOCHS = 25  # v17: Target KL=3k by epoch 15
 BATCH_SIZE = 512  # A100: 40GB VRAM (L4 used 256 with 24GB)
-LEARNING_RATE = 3e-3  # v17: INCREASED to 3e-3 (20x efficiency vs standard VAE, 1.5x vs v16)
-LEARNING_RATE_D = 3e-4  # Discriminator learning rate (10x slower than main, maintains ratio)
+LEARNING_RATE = 2e-3  # v16 rate (LBO seeks interior, not edge - barriers protect boundaries)
+LEARNING_RATE_D = 2e-4  # Discriminator learning rate (10x slower than main)
 WEIGHT_DECAY = 1e-5
 CALIBRATION_BATCHES = 200
 MAX_GRAD_NORM = 1.0
@@ -72,8 +72,10 @@ GOAL_SPECS = {
     'swap_color_hist': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # histogram(r_sw) ≈ histogram(x2)
 
     # v14: Realism group - discriminator goals
-    'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # D should classify recon as real
-    'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},   # D should classify swap as real
+    # Fixed scale=2.0: Discriminator untrained during calibration (D≈0.5), but learns quickly
+    # After training starts, D(recon) can reach 0.99. Need large scale to handle this range.
+    'realism_recon': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 2.0},  # D should classify recon as real
+    'realism_swap': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 2.0},   # D should classify swap as real
 
     # Behavioral walls (what core/detail actually DO)
     'core_color_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # Δz_core shouldn't change colors

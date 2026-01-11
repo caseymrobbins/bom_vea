@@ -99,7 +99,9 @@ GOAL_SPECS = {
 
     'cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'weak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.1},
-    'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
+    # Consistency: Use large fixed scale to handle augmentation-induced variance
+    # Auto-calibration sees p95≈115 but training reaches 200-250 due to augmentation strength
+    'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 500.0},
 
     # v15: Dimension capacity utilization (inactive/ineffective ratios - minimize these)
     # v17 FIX: Relaxed from 0.3 to 0.4 (70%→60% active) to reduce conflict with variance constraints

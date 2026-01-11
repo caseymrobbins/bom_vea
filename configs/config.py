@@ -112,7 +112,7 @@ GOAL_SPECS = {
     # v17b: Widened bounds (observed violations: detail_mean=21.32, detail_var_mean=354.0)
     'detail_mean': {'type': ConstraintType.BOX, 'lower': -30.0, 'upper': 30.0},  # Was [-20, 20], violated by 21.32
     'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 500.0},  # Was 350, violated by 354.0
-    'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 1.0},
+    'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # v17f: Fixed scale=1.0 → auto (calibration saw 4.9-30.7)
     'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # Health group - v17: WIDER variance bounds to allow latent space spreading

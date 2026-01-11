@@ -312,7 +312,7 @@ for epoch in range(1, EPOCHS + 1):
                 optimizer_d.zero_grad(set_to_none=True)
                 skip_count += 1
                 continue
-            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
+            # No gradient clipping - external constraint
             optimizer_d.step()
 
         if needs_recal and batch_idx < CALIBRATION_BATCHES:
@@ -330,7 +330,7 @@ for epoch in range(1, EPOCHS + 1):
                     optimizer.zero_grad(set_to_none=True)
                     skip_count += 1
                     continue
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # No gradient clipping - external constraint
                 optimizer.step()
                 pbar.set_postfix({'phase': 'CALIBRATING'})
                 continue
@@ -356,122 +356,41 @@ for epoch in range(1, EPOCHS + 1):
                     print(f"  {goal_name:20s} | Raw: {raw:10.6f} → Normalized: {norm:6.4f}")
             print("-" * 100 + "\n")
 
-        # BOM philosophy: Let it crash loudly if constraints violated, don't mask with reloads
-        if result is None:
-            print(f"ERROR: Loss computation failed (returned None) at epoch {epoch}, batch {batch_idx}")
-            print(f"This means a barrier was violated or NaN/Inf detected.")
-            print(f"Fix: Adjust initialization or widen BOX constraints, don't mask the crash.")
-            raise RuntimeError("BOM barrier violation - loss returned None")
-
+        # SINGLE SKIP DECISION POINT: Check result validity BEFORE calling log(min())
+        # If s_min <= 0, skip immediately without backward/step
         loss = result['loss']
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"ERROR: Loss is NaN/Inf at epoch {epoch}, batch {batch_idx}")
-            print(f"loss value: {loss.item()}")
-            raise RuntimeError("BOM barrier violation - loss is NaN/Inf")
-
         min_group = result['groups'].min().item()
-        if min_group < MIN_GROUP_GRAD_THRESHOLD:
+
+        # Skip conditions: result invalid OR s_min too small
+        should_skip = (
+            result is None or
+            torch.isnan(loss) or
+            torch.isinf(loss) or
+            min_group <= 0
+        )
+
+        if should_skip:
             skip_count += 1
             optimizer.zero_grad(set_to_none=True)
-            consecutive_rollbacks += 1
-            if consecutive_rollbacks == 1:
-                # First rollback - print full diagnostics
-                print_rollback_diagnostics(epoch, batch_idx, result, model, loss,
-                                          failure_reason=f"S_min={min_group:.6f} < {MIN_GROUP_GRAD_THRESHOLD:.1e} (grad safety threshold)")
-                first_rollback_info = {'batch': batch_idx, 'count': 1}
-            elif consecutive_rollbacks % 10 == 0:
-                # Every 10th - show condensed goal scores
-                print(f"\n📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): S_min={min_group:.6f} < threshold")
-                gv = result.get('group_values', {})
-                if gv:
-                    print("   Groups: " + ", ".join(f"{n}={v:.4f}" for n, v in sorted(gv.items(), key=lambda x: x[1])[:7]))
-                ig = result.get('individual_goals', {})
-                raw = result.get('raw_values', {})
-                if ig:
-                    worst_5 = sorted(ig.items(), key=lambda x: x[1])[:5]
-                    for name, score in worst_5:
-                        raw_key = name if name in raw else f"{name}_raw"
-                        raw_val = raw.get(raw_key, "N/A")
-                        if isinstance(raw_val, (int, float)):
-                            print(f"      {name:20s}: score={score:.6f}  raw={raw_val:10.4f}")
-                        else:
-                            print(f"      {name:20s}: score={score:.6f}")
-
-            # HALT after 100 consecutive rollbacks (was 5)
-            if consecutive_rollbacks >= 100:
-                print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive rollbacks detected")
-                print(f"   This indicates S_min is consistently too small for safe gradients")
-                print(f"   Review the diagnostics above to identify which constraints are too tight")
-                print(f"   Possible fixes:")
-                print(f"     1. Widen BOX constraints or increase auto-scale percentiles")
-                print(f"     2. Reduce learning rate (current: {LEARNING_RATE})")
-                print(f"     3. Increase MIN_GROUP_GRAD_THRESHOLD (current: {MIN_GROUP_GRAD_THRESHOLD:.1e})")
-                raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive rollbacks")
-
-            continue
-
-        loss.backward()
-        bad_grad = any(
-            p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
-            for p in model.parameters()
-        )
-        if bad_grad:
-            skip_count += 1
             consecutive_rollbacks += 1
 
             if consecutive_rollbacks == 1:
                 # First skip - print full diagnostics
-                print_rollback_diagnostics(epoch, batch_idx, result, model, loss,
-                                          failure_reason="NaN/Inf gradients detected BEFORE grad clipping (bad_grad check)")
+                if result is None:
+                    failure_reason = "Loss computation returned None"
+                elif torch.isnan(loss):
+                    failure_reason = "Loss is NaN"
+                elif torch.isinf(loss):
+                    failure_reason = "Loss is Inf"
+                else:
+                    failure_reason = f"S_min={min_group:.6f} <= 0 (would cause log(0) or log(negative))"
+
+                print_rollback_diagnostics(epoch, batch_idx, result, model, loss, failure_reason=failure_reason)
                 first_rollback_info = {'batch': batch_idx, 'count': 1}
+
             elif consecutive_rollbacks % 10 == 0:
                 # Every 10th skip - show condensed goal scores
-                print(f"\n📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): Loss={loss.item():.4f}, S_min={result['groups'].min().item():.6f}")
-                gv = result.get('group_values', {})
-                if gv:
-                    print("   Groups: " + ", ".join(f"{n}={v:.4f}" for n, v in sorted(gv.items(), key=lambda x: x[1])[:7]))
-                # Show worst 5 individual goals
-                ig = result.get('individual_goals', {})
-                raw = result.get('raw_values', {})
-                if ig:
-                    worst_5 = sorted(ig.items(), key=lambda x: x[1])[:5]
-                    for name, score in worst_5:
-                        raw_key = name if name in raw else f"{name}_raw"
-                        raw_val = raw.get(raw_key, "N/A")
-                        if isinstance(raw_val, (int, float)):
-                            print(f"      {name:20s}: score={score:.6f}  raw={raw_val:10.4f}")
-                        else:
-                            print(f"      {name:20s}: score={score:.6f}")
-
-            # HALT after 100 consecutive skips (was 5)
-            if consecutive_rollbacks >= 100:
-                print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive gradient skips detected")
-                print(f"   This indicates gradients are consistently NaN/Inf BEFORE clipping")
-                print(f"   Review the diagnostics above - likely causes:")
-                print(f"     1. Logvar values too large (check encoder logvar clamp)")
-                print(f"     2. Z values exploding (check reparameterize)")
-                print(f"     3. Decoder producing extreme outputs")
-                print(f"     4. Loss computation numerical instability")
-                print(f"     5. BOX constraints too tight (values at boundaries)")
-                raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive gradient skips")
-
-            optimizer.zero_grad(set_to_none=True)
-            continue
-
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-        if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-            skip_count += 1
-            optimizer.zero_grad(set_to_none=True)
-            consecutive_rollbacks += 1
-
-            if consecutive_rollbacks == 1:
-                # First rollback - print full diagnostics
-                print_rollback_diagnostics(epoch, batch_idx, result, model, loss, grad_norm,
-                                          failure_reason="Non-finite gradients after backward()")
-                first_rollback_info = {'batch': batch_idx, 'count': 1}
-            elif consecutive_rollbacks % 10 == 0:
-                # Every 10th - show condensed goal scores
-                print(f"\n📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): grad_norm=nan/inf")
+                print(f"\n📊 SKIP #{consecutive_rollbacks} (Batch {batch_idx}): S_min={min_group:.6f}")
                 gv = result.get('group_values', {})
                 if gv:
                     print("   Groups: " + ", ".join(f"{n}={v:.4f}" for n, v in sorted(gv.items(), key=lambda x: x[1])[:7]))
@@ -487,121 +406,28 @@ for epoch in range(1, EPOCHS + 1):
                         else:
                             print(f"      {name:20s}: score={score:.6f}")
 
-            # HALT after 100 consecutive rollbacks (was 5)
+            # HALT after 100 consecutive skips
             if consecutive_rollbacks >= 100:
-                print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive rollbacks detected")
-                print(f"   This indicates a fundamental issue with loss computation or gradients")
-                print(f"   Review the diagnostics above to identify the problem")
+                print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive skips detected")
+                print(f"   S_min consistently <= 0, preventing gradient computation")
                 print(f"   Possible fixes:")
-                print(f"     1. Widen BOX constraints or auto-scale bounds")
-                print(f"     2. Reduce learning rate")
-                print(f"     3. Check for NaN in model initialization")
-                raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive rollbacks")
+                print(f"     1. Widen BOX constraints or change fixed scales to 'auto'")
+                print(f"     2. Reduce learning rate (current: {LEARNING_RATE})")
+                print(f"     3. Check calibration output for extreme p95 values")
+                raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive skips")
 
             continue
 
-        # LBO Directive #4: Discrete Rejection / Rollback Mechanism
-        # Save state before stepping - allows rollback if update violates constraints
-        state_before_step = {
-            'model': {k: v.clone() for k, v in model.state_dict().items()},
-            'optimizer': copy.deepcopy(optimizer.state_dict())
-        }
-
-        # DIAGNOSTIC: Check model health BEFORE step
-        with torch.no_grad():
-            sample_param = next(model.parameters())
-            if torch.isnan(sample_param).any() or torch.isinf(sample_param).any():
-                print(f"    [PRE-STEP] Model weights already corrupted BEFORE optimizer.step()!")
-
+        # If we get here, s_min > 0, safe to proceed with backward/step
+        # LBO: No gradient clipping - that would be an external constraint
+        loss.backward()
         optimizer.step()
 
-        # Look-ahead: Check if the update caused any group to violate constraints
-        with torch.no_grad():
-            recon_check, mu_check, logvar_check, z_check = model(x)
-            check_result = grouped_bom_loss(recon_check, x, mu_check, logvar_check, z_check, model,
-                                          goal_system, vgg, split_idx, GROUP_NAMES, discriminator,
-                                          x_aug)
-
-            # If update caused violation (S_min ≤ 0 or NaN), ROLLBACK
-            if check_result is None or torch.isnan(check_result['loss']) or torch.isinf(check_result['loss']):
-                # Restore state
-                model.load_state_dict(state_before_step['model'])
-                optimizer.load_state_dict(state_before_step['optimizer'])
-                skip_count += 1
-                optimizer.zero_grad(set_to_none=True)
-
-                # DIAGNOSTIC: Verify restoration worked
-                with torch.no_grad():
-                    sample_param_after = next(model.parameters())
-                    if torch.isnan(sample_param_after).any() or torch.isinf(sample_param_after).any():
-                        print(f"    [POST-ROLLBACK] Model weights STILL corrupted after restore!")
-                    # Also test forward pass after restore
-                    try:
-                        recon_test, mu_test, logvar_test, z_test = model(x)
-                        if torch.isnan(recon_test).any() or torch.isnan(mu_test).any():
-                            print(f"    [POST-ROLLBACK] Forward pass still produces NaN after restore!")
-                    except:
-                        print(f"    [POST-ROLLBACK] Forward pass crashed after restore!")
-
-                # Track consecutive rollbacks to batch output
-                consecutive_rollbacks += 1
-
-                if consecutive_rollbacks == 1:
-                    # First rollback - print full diagnostics
-                    failure_msg = "Constraint violation after optimizer.step()"
-                    if check_result is None:
-                        failure_msg += " (loss computation returned None)"
-                    elif torch.isnan(check_result['loss']):
-                        failure_msg += " (loss is NaN)"
-                    elif torch.isinf(check_result['loss']):
-                        failure_msg += " (loss is Inf)"
-                    else:
-                        failure_msg += f" (S_min ≤ 0 or violated barrier)"
-
-                    print_rollback_diagnostics(epoch, batch_idx, check_result, model,
-                                              loss=check_result['loss'] if check_result else None,
-                                              failure_reason=failure_msg)
-                    first_rollback_info = {'batch': batch_idx, 'count': 1}
-
-                elif consecutive_rollbacks % 10 == 0:
-                    # Every 10th - show condensed goal scores
-                    if check_result is not None:
-                        print(f"\n📊 ROLLBACK #{consecutive_rollbacks} (Batch {batch_idx}): Post-step violation")
-                        gv = check_result.get('group_values', {})
-                        if gv:
-                            print("   Groups: " + ", ".join(f"{n}={v:.4f}" for n, v in sorted(gv.items(), key=lambda x: x[1])[:7]))
-                        ig = check_result.get('individual_goals', {})
-                        raw = check_result.get('raw_values', {})
-                        if ig:
-                            worst_5 = sorted(ig.items(), key=lambda x: x[1])[:5]
-                            for name, score in worst_5:
-                                raw_key = name if name in raw else f"{name}_raw"
-                                raw_val = raw.get(raw_key, "N/A")
-                                if isinstance(raw_val, (int, float)):
-                                    print(f"      {name:20s}: score={score:.6f}  raw={raw_val:10.4f}")
-                                else:
-                                    print(f"      {name:20s}: score={score:.6f}")
-                    else:
-                        print(f"    ... {consecutive_rollbacks} consecutive rollbacks (check_result=None)")
-
-                # HALT after 100 consecutive rollbacks (was 5)
-                if consecutive_rollbacks >= 100:
-                    print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive rollbacks detected")
-                    print(f"   This indicates optimizer updates are consistently violating constraints")
-                    print(f"   Review the diagnostics above to identify which constraints are failing")
-                    print(f"   Possible fixes:")
-                    print(f"     1. Widen BOX constraints that are being violated")
-                    print(f"     2. Reduce learning rate (current: {LEARNING_RATE})")
-                    print(f"     3. Check if goals are scaling properly (review calibration output)")
-                    raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive rollbacks")
-
-                continue
-            else:
-                # Successful step - reset consecutive counter
-                if consecutive_rollbacks > 0:
-                    print(f"    ✓ Recovered after {consecutive_rollbacks} rollbacks (batch {batch_idx})\n")
-                    consecutive_rollbacks = 0
-                    first_rollback_info = None
+        # Successful step - reset consecutive counter
+        if consecutive_rollbacks > 0:
+            print(f"    ✓ Recovered after {consecutive_rollbacks} skips (batch {batch_idx})\n")
+            consecutive_rollbacks = 0
+            first_rollback_info = None
         
         if batch_idx % 10 == 0:
             with torch.no_grad():

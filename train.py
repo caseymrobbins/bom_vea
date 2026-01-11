@@ -50,46 +50,91 @@ split_idx = LATENT_DIM // 2
 # Augmentation for consistency loss - batched on GPU
 import torchvision.transforms as T
 
-def diagnose_rollback(check_result, group_names):
-    """Provide detailed diagnostic information about why a rollback occurred."""
-    if check_result is None:
-        return "S_min ≤ 0 | Complete constraint violation"
+def print_rollback_diagnostics(epoch, batch_idx, result, model, loss=None, grad_norm=None, failure_reason="Unknown"):
+    """Print comprehensive diagnostics when a rollback occurs."""
+    print("\n" + "="*100)
+    print(f"🚨 ROLLBACK DIAGNOSTIC - Epoch {epoch}, Batch {batch_idx}")
+    print("="*100)
+    print(f"FAILURE REASON: {failure_reason}\n")
 
-    # FRONT-LOAD critical info: show min group score FIRST
-    gv = check_result.get('group_values', {})
+    # 1. LOSS BREAKDOWN
+    if loss is not None:
+        print(f"📊 LOSS: {loss.item():.6f} (isnan={torch.isnan(loss)}, isinf={torch.isinf(loss)})")
+    if grad_norm is not None:
+        print(f"📊 GRAD NORM: {grad_norm:.6f} (isnan={torch.isnan(grad_norm)}, isinf={torch.isinf(grad_norm)})")
+    print()
+
+    if result is None:
+        print("⚠️  Result is None - loss computation failed completely\n")
+        print("="*100 + "\n")
+        return
+
+    # 2. GROUP SCORES (sorted by score)
+    print("📊 GROUP SCORES (sorted worst → best):")
+    gv = result.get('group_values', {})
     if gv:
-        min_group_name = group_names[check_result['min_idx'].item()]
-        min_group_score = gv[min_group_name]
-        prefix = f"min_group={min_group_score:.4f} ({min_group_name})"
-    else:
-        prefix = "Unknown group"
+        sorted_groups = sorted(gv.items(), key=lambda x: x[1])
+        for i, (name, score) in enumerate(sorted_groups):
+            status = "🔴" if score <= 0.05 else ("🟡" if score <= 0.3 else "🟢")
+            print(f"  {i+1}. {status} {name:15s}: {score:.6f}")
+    print()
 
-    diag = []
+    # 3. INDIVIDUAL GOALS (show worst 15)
+    print("🎯 WORST 15 INDIVIDUAL GOALS (with raw values):")
+    ig = result.get('individual_goals', {})
+    raw = result.get('raw_values', {})
+    if ig:
+        sorted_goals = sorted(ig.items(), key=lambda x: x[1])[:15]
+        for i, (name, score) in enumerate(sorted_goals):
+            raw_key = name if name in raw else f"{name}_raw"
+            raw_val = raw.get(raw_key, "N/A")
+            status = "🔴" if score <= 0.01 else ("🟡" if score <= 0.1 else "🟢")
+            if isinstance(raw_val, (int, float)):
+                print(f"  {i+1:2d}. {status} {name:20s}: score={score:.6f}  raw={raw_val:10.4f}")
+            else:
+                print(f"  {i+1:2d}. {status} {name:20s}: score={score:.6f}  raw={raw_val}")
+    print()
 
-    # Check for NaN/Inf loss
-    if torch.isnan(check_result['loss']):
-        diag.append("Loss=NaN")
-    if torch.isinf(check_result['loss']):
-        diag.append("Loss=Inf")
+    # 4. MODEL WEIGHT STATISTICS
+    print("🔍 MODEL WEIGHT STATISTICS:")
+    with torch.no_grad():
+        total_params = sum(p.numel() for p in model.parameters())
+        nan_count = sum(torch.isnan(p).sum().item() for p in model.parameters())
+        inf_count = sum(torch.isinf(p).sum().item() for p in model.parameters())
+        if nan_count == 0 and inf_count == 0:
+            print(f"  ✅ All {total_params:,} parameters finite")
+        else:
+            print(f"  ⚠️  {nan_count:,} NaN params, {inf_count:,} Inf params out of {total_params:,}")
+            # Show which layers have issues
+            for name, param in model.named_parameters():
+                if param.numel() > 0:
+                    has_nan = torch.isnan(param).any().item()
+                    has_inf = torch.isinf(param).any().item()
+                    if has_nan or has_inf:
+                        print(f"     ⚠️  {name}: has_nan={has_nan}, has_inf={has_inf}")
+    print()
 
-    # Show top 3 failing individual goals (≤ 0.01 = danger zone)
-    ig = check_result.get('individual_goals', {})
-    failing_goals = {name: val for name, val in ig.items() if val <= 0.01}
-    if failing_goals:
-        top_failing = sorted(failing_goals.items(), key=lambda x: x[1])[:3]
-        diag.append(f"Failing: {', '.join(f'{k}={v:.4f}' for k, v in top_failing)}")
+    # 5. GRADIENT STATISTICS (if available)
+    print("📈 GRADIENT STATISTICS:")
+    with torch.no_grad():
+        grad_layers = []
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                grad_norm_layer = param.grad.norm().item()
+                has_nan = torch.isnan(param.grad).any().item()
+                has_inf = torch.isinf(param.grad).any().item()
+                if has_nan or has_inf or grad_norm_layer > 100:
+                    grad_layers.append((name, grad_norm_layer, has_nan, has_inf))
 
-    # Show all groups in danger zone (≤ 0.05)
-    if gv:
-        danger_groups = {name: val for name, val in gv.items() if val <= 0.05}
-        if danger_groups:
-            diag.append(f"Danger: {', '.join(f'{k}={v:.4f}' for k, v in sorted(danger_groups.items(), key=lambda x: x[1]))}")
+        if grad_layers:
+            print(f"  ⚠️  Problematic gradient layers:")
+            for name, norm, has_nan, has_inf in sorted(grad_layers, key=lambda x: -x[1])[:10]:
+                print(f"     {name}: norm={norm:.6f}, has_nan={has_nan}, has_inf={has_inf}")
+        else:
+            print(f"  ✅ No gradients available or all gradients healthy")
+    print()
 
-    # Combine: "[min_group info] | [details]"
-    if diag:
-        return f"{prefix} | {' | '.join(diag)}"
-    else:
-        return prefix
+    print("="*100 + "\n")
 
 aug_transform = torch.nn.Sequential(
     T.RandomHorizontalFlip(p=0.5),
@@ -301,17 +346,26 @@ for epoch in range(1, EPOCHS + 1):
             skip_count += 1
             optimizer.zero_grad(set_to_none=True)
             consecutive_rollbacks += 1
+
             if consecutive_rollbacks == 1:
-                first_rollback_info = {
-                    'batch': batch_idx,
-                    'min_group': 0.0,
-                    'failed': 'Non-finite gradients'
-                }
-                print(f"\n⚠️  [ROLLBACK] Epoch {epoch}, Batch {batch_idx}")
-                print(f"    S_min = {first_rollback_info['min_group']:.6f}")
-                print(f"    Failed: {first_rollback_info['failed']}")
+                # First rollback - print full diagnostics
+                print_rollback_diagnostics(epoch, batch_idx, result, model, loss, grad_norm,
+                                          failure_reason="Non-finite gradients after backward()")
+                first_rollback_info = {'batch': batch_idx, 'count': 1}
             elif consecutive_rollbacks % 10 == 0:
                 print(f"    ... {consecutive_rollbacks} consecutive rollbacks (since batch {first_rollback_info['batch']})")
+
+            # HALT after 5 consecutive rollbacks to prevent infinite loop
+            if consecutive_rollbacks >= 5:
+                print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive rollbacks detected")
+                print(f"   This indicates a fundamental issue with loss computation or gradients")
+                print(f"   Review the diagnostics above to identify the problem")
+                print(f"   Possible fixes:")
+                print(f"     1. Widen BOX constraints or auto-scale bounds")
+                print(f"     2. Reduce learning rate")
+                print(f"     3. Check for NaN in model initialization")
+                raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive rollbacks")
+
             continue
 
         # LBO Directive #4: Discrete Rejection / Rollback Mechanism
@@ -361,38 +415,36 @@ for epoch in range(1, EPOCHS + 1):
                 consecutive_rollbacks += 1
 
                 if consecutive_rollbacks == 1:
-                    # First rollback - capture full diagnostic
-                    if check_result is not None:
-                        groups = check_result.get('groups', [])
-                        raw_vals = check_result.get('raw_values', {})
-                        min_group_val = groups.min().item() if len(groups) > 0 else 0.0
-
-                        # Find which constraint failed
-                        failed_goals = []
-                        for name, val in check_result.get('individual_goals', {}).items():
-                            if val <= 0:
-                                raw_val = raw_vals.get(name + '_raw', raw_vals.get(name, 'N/A'))
-                                failed_goals.append(f"{name}={val:.4f} (raw={raw_val})")
-
-                        first_rollback_info = {
-                            'batch': batch_idx,
-                            'min_group': min_group_val,
-                            'failed': ', '.join(failed_goals[:3]) if failed_goals else 'Unknown'  # Show first 3
-                        }
+                    # First rollback - print full diagnostics
+                    failure_msg = "Constraint violation after optimizer.step()"
+                    if check_result is None:
+                        failure_msg += " (loss computation returned None)"
+                    elif torch.isnan(check_result['loss']):
+                        failure_msg += " (loss is NaN)"
+                    elif torch.isinf(check_result['loss']):
+                        failure_msg += " (loss is Inf)"
                     else:
-                        first_rollback_info = {
-                            'batch': batch_idx,
-                            'min_group': 0.0,
-                            'failed': 'Loss returned None'
-                        }
+                        failure_msg += f" (S_min ≤ 0 or violated barrier)"
 
-                    print(f"\n⚠️  [ROLLBACK] Epoch {epoch}, Batch {batch_idx}")
-                    print(f"    S_min = {first_rollback_info['min_group']:.6f}")
-                    print(f"    Failed: {first_rollback_info['failed']}")
+                    print_rollback_diagnostics(epoch, batch_idx, check_result, model,
+                                              loss=check_result['loss'] if check_result else None,
+                                              failure_reason=failure_msg)
+                    first_rollback_info = {'batch': batch_idx, 'count': 1}
 
                 elif consecutive_rollbacks % 10 == 0:
                     # Every 10th consecutive rollback, show count
                     print(f"    ... {consecutive_rollbacks} consecutive rollbacks (since batch {first_rollback_info['batch']})")
+
+                # HALT after 5 consecutive rollbacks to prevent infinite loop
+                if consecutive_rollbacks >= 5:
+                    print(f"\n🛑 HALTING: {consecutive_rollbacks} consecutive rollbacks detected")
+                    print(f"   This indicates optimizer updates are consistently violating constraints")
+                    print(f"   Review the diagnostics above to identify which constraints are failing")
+                    print(f"   Possible fixes:")
+                    print(f"     1. Widen BOX constraints that are being violated")
+                    print(f"     2. Reduce learning rate (current: {LEARNING_RATE})")
+                    print(f"     3. Check if goals are scaling properly (review calibration output)")
+                    raise RuntimeError(f"Training halted after {consecutive_rollbacks} consecutive rollbacks")
 
                 continue
             else:

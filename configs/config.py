@@ -20,7 +20,7 @@ BATCH_SIZE = 512  # A100: 40GB VRAM (L4 used 256 with 24GB)
 LEARNING_RATE = 2e-3  # v16 rate (LBO seeks interior, not edge - barriers protect boundaries)
 LEARNING_RATE_D = 2e-4  # Discriminator learning rate (10x slower than main)
 WEIGHT_DECAY = 1e-5
-CALIBRATION_BATCHES = 200
+CALIBRATION_BATCHES = 79  # 20% of 395 batches for CelebA
 MAX_GRAD_NORM = 1.0
 MIN_GROUP_GRAD_THRESHOLD = 1e-6  # Skip backward if S_min too small (avoids non-finite grads)
 
@@ -99,7 +99,9 @@ GOAL_SPECS = {
 
     'cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
     'weak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 0.1},
-    'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
+    # Consistency: Use large fixed scale to handle augmentation-induced variance
+    # Auto-calibration sees p95≈115 but training reaches 200-250 due to augmentation strength
+    'core_consistency': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 500.0},
 
     # v15: Dimension capacity utilization (inactive/ineffective ratios - minimize these)
     # v17 FIX: Relaxed from 0.3 to 0.4 (70%→60% active) to reduce conflict with variance constraints

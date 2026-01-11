@@ -42,8 +42,8 @@ def make_normalizer_torch(ctype: ConstraintType, **kwargs) -> Callable:
         return soft_asymmetric_box
     
     if ctype == ConstraintType.MINIMIZE_SOFT:
-        scale = kwargs["scale"]
-        return lambda x: torch.exp(-torch.clamp(x, min=0.0) / scale) if scale > 0 else torch.zeros_like(x)
+        scale = max(kwargs["scale"], 5e-4)  # Enforce minimum scale to prevent numerical instability
+        return lambda x: torch.exp(-torch.clamp(x, min=0.0) / scale)
     
     if ctype == ConstraintType.MINIMIZE_HARD:
         scale = kwargs.get("scale", 1.0)
@@ -86,19 +86,26 @@ class GoalSystem:
                     min_val = np.min(self.samples[name])
                     max_val = np.max(self.samples[name])
                     mean_val = np.mean(self.samples[name])
-                    # Use max if median is near zero (prevents over-sensitivity)
-                    # Minimum scale 0.001 to prevent goals from collapsing to zero
+                    percentile_95 = np.percentile(self.samples[name], 95)
+
+                    # LBO Constitution: "START WIDE, SQUEEZE LATER"
+                    # Use max(95th percentile, mean) to handle outliers while staying robust
+                    # Minimum scale 5e-4 to prevent numerical instability
                     if median < 1e-4:
-                        self.scales[name] = max(max_val, 0.001)
+                        # Near-zero median: use max to contain all values
+                        self.scales[name] = max(max_val, 5e-4)
                     else:
-                        self.scales[name] = max(median, 0.001)
+                        # Use 95th percentile or mean (whichever is larger) to handle high-variance metrics
+                        # This prevents calibration→crash from outliers (e.g., consistency: median=7.5, max=222)
+                        robust_scale = max(percentile_95, mean_val)
+                        self.scales[name] = max(robust_scale, 5e-4)
 
                     # Apply epoch 1 safety margin
                     self.scales[name] *= epoch1_margin
 
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
                     margin_note = " (+10% margin)" if epoch == 1 else ""
-                    print(f"  {name:20s}: scale={self.scales[name]:.4f}{margin_note} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
+                    print(f"  {name:20s}: scale={self.scales[name]:.4f}{margin_note} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f} p95={percentile_95:.4f}")
                 else:
                     self.scales[name] = 1.0 * epoch1_margin
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
@@ -112,7 +119,8 @@ class GoalSystem:
                     max_val = np.max(self.samples[name])
                     mean_val = np.mean(self.samples[name])
                     median = np.median(self.samples[name])
-                    print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed) | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
+                    percentile_95 = np.percentile(self.samples[name], 95)
+                    print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed) | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f} p95={percentile_95:.4f}")
                 else:
                     print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed)")
             elif ctype == ConstraintType.BOX:
@@ -217,6 +225,9 @@ class GoalSystem:
         print("=" * 60 + "\n")
 
 def geometric_mean(goals):
-    """Geometric mean - crashes on exact zero (fail-fast BOM)"""
+    """Geometric mean with epsilon protection against underflow"""
     goals = torch.stack(goals)
-    return goals.prod() ** (1.0 / len(goals))
+    # Clamp to prevent underflow in product (min value = 1e-10 → prod^(1/n) ≥ 1e-10)
+    goals = torch.clamp(goals, min=1e-10)
+    product = goals.prod()
+    return product ** (1.0 / len(goals))

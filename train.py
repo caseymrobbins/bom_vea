@@ -183,7 +183,7 @@ for epoch in range(1, EPOCHS + 1):
             GOAL_SPECS['kl_detail']['upper'] = new_upper
             # Re-initialize goal system normalizers with new bounds
             goal_system.goal_specs = GOAL_SPECS
-            goal_system.initialize_normalizers()
+            goal_system.rebuild_normalizers()
             print(f"🔽 KL ceiling squeezed to {new_upper:,} nats (epoch {epoch})")
 
     model.train()
@@ -293,6 +293,7 @@ for epoch in range(1, EPOCHS + 1):
         if needs_recal and batch_idx == CALIBRATION_BATCHES:
             goal_system.calibrate(epoch=epoch)
             needs_recal = False
+            # Note: Removed BN reset - calibration stats should be fine for LBO training
 
         result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
 
@@ -323,6 +324,24 @@ for epoch in range(1, EPOCHS + 1):
             print(f"loss value: {loss.item()}")
             raise RuntimeError("BOM barrier violation - loss is NaN/Inf")
 
+        min_group = result['groups'].min().item()
+        if min_group < MIN_GROUP_GRAD_THRESHOLD:
+            skip_count += 1
+            optimizer.zero_grad(set_to_none=True)
+            consecutive_rollbacks += 1
+            if consecutive_rollbacks == 1:
+                first_rollback_info = {
+                    'batch': batch_idx,
+                    'min_group': min_group,
+                    'failed': f"S_min < {MIN_GROUP_GRAD_THRESHOLD:.1e} (grad safety)"
+                }
+                print(f"\n⚠️  [ROLLBACK] Epoch {epoch}, Batch {batch_idx}")
+                print(f"    S_min = {first_rollback_info['min_group']:.6f}")
+                print(f"    Failed: {first_rollback_info['failed']}")
+            elif consecutive_rollbacks % 10 == 0:
+                print(f"    ... {consecutive_rollbacks} consecutive rollbacks (since batch {first_rollback_info['batch']})")
+            continue
+
         loss.backward()
         bad_grad = any(
             p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
@@ -332,6 +351,22 @@ for epoch in range(1, EPOCHS + 1):
             print("    [STEP SKIP] NaN/Inf gradients detected")
             optimizer.zero_grad(set_to_none=True)
             skip_count += 1
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+        if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+            skip_count += 1
+            optimizer.zero_grad(set_to_none=True)
+            consecutive_rollbacks += 1
+            if consecutive_rollbacks == 1:
+                first_rollback_info = {
+                    'batch': batch_idx,
+                    'min_group': min_group,
+                    'failed': 'Non-finite gradients'
+                }
+                print(f"\n⚠️  [ROLLBACK] Epoch {epoch}, Batch {batch_idx}")
+                print(f"    S_min = {first_rollback_info['min_group']:.6f}")
+                print(f"    Failed: {first_rollback_info['failed']}")
+            elif consecutive_rollbacks % 10 == 0:
+                print(f"    ... {consecutive_rollbacks} consecutive rollbacks (since batch {first_rollback_info['batch']})")
             continue
 
         # LBO Directive #4: Discrete Rejection / Rollback Mechanism

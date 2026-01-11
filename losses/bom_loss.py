@@ -346,9 +346,12 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     core_edge_shift = F.mse_loss(edges(recon_pert_core), edges(recon))
     detail_color_shift = F.mse_loss(mean_color(recon_pert_detail), mean_color(recon))
+    # Use 1e-2 epsilon: gradient of 1/(x+eps) is -1/(x+eps)^2
+    # With eps=1e-4: grad can reach 1e8 when x→0
+    # With eps=1e-2: grad maxes at 1e4 (much safer)
     traversal_loss = 0.5 * (
-        1.0 / (core_edge_shift + 1e-4) +
-        1.0 / (detail_color_shift + 1e-4)
+        1.0 / (core_edge_shift + 1e-2) +
+        1.0 / (detail_color_shift + 1e-2)
     )
     g_traversal = goals.goal(traversal_loss, 'traversal')
 
@@ -375,9 +378,10 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     # SUB-GROUP F2: Independence & Consistency
     z_c = z_core - z_core.mean(0, keepdim=True)  # No clamp on z
-    cov = (z_c.T @ z_c) / (B - 1 + 1e-8)
-    diag = torch.diag(cov) + 1e-8
-    cov_penalty = (cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum()  # No clamp on cov
+    cov = (z_c.T @ z_c) / (B - 1 + 1e-2)  # Larger epsilon to prevent gradient explosion
+    diag = torch.diag(cov) + 1e-2
+    # Clamp denominator to prevent division by near-zero causing huge gradients
+    cov_penalty = (cov.pow(2).sum() - diag.pow(2).sum()) / torch.clamp(diag.pow(2).sum(), min=1e-1)
     g_cov = goals.goal(cov_penalty, 'cov')
     g_weak = goals.goal((mu_core.var(0) < 0.1).float().mean(), 'weak')
 
@@ -409,10 +413,14 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     g_detail_active = goals.goal(detail_inactive_ratio, 'detail_active')
 
     # Effective dimensions (exponential of entropy)
-    core_var_norm = core_var_per_dim / (core_var_per_dim.sum() + 1e-8) + 1e-8
-    detail_var_norm = detail_var_per_dim / (detail_var_per_dim.sum() + 1e-8) + 1e-8
-    core_effective = torch.exp(-torch.sum(core_var_norm * torch.log(core_var_norm)))
-    detail_effective = torch.exp(-torch.sum(detail_var_norm * torch.log(detail_var_norm)))
+    # Clamp to prevent log(0) which causes -inf and huge gradients
+    core_var_norm = core_var_per_dim / (core_var_per_dim.sum() + 1e-2) + 1e-2
+    detail_var_norm = detail_var_per_dim / (detail_var_per_dim.sum() + 1e-2) + 1e-2
+    # Clamp inputs to log() to prevent extreme gradients
+    core_var_norm_safe = torch.clamp(core_var_norm, min=1e-2, max=1.0)
+    detail_var_norm_safe = torch.clamp(detail_var_norm, min=1e-2, max=1.0)
+    core_effective = torch.exp(-torch.sum(core_var_norm_safe * torch.log(core_var_norm_safe)))
+    detail_effective = torch.exp(-torch.sum(detail_var_norm_safe * torch.log(detail_var_norm_safe)))
 
     # Ineffective ratio (want to minimize - higher effective dims is better)
     core_ineffective_ratio = (total_dims - core_effective) / total_dims
@@ -430,16 +438,18 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     g_detail_var_mean = goals.goal(detail_var_mean_val, 'detail_var_mean')
 
     z_d = z_detail - z_detail.mean(0, keepdim=True)  # No clamp on z
-    cov_d = (z_d.T @ z_d) / (B - 1 + 1e-8)
-    diag_d = torch.diag(cov_d) + 1e-8
-    detail_cov_penalty = (cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum()  # No clamp on cov
+    cov_d = (z_d.T @ z_d) / (B - 1 + 1e-2)  # Larger epsilon to prevent gradient explosion
+    diag_d = torch.diag(cov_d) + 1e-2
+    # Clamp denominator to prevent division by near-zero causing huge gradients
+    detail_cov_penalty = (cov_d.pow(2).sum() - diag_d.pow(2).sum()) / torch.clamp(diag_d.pow(2).sum(), min=1e-1)
     g_detail_cov = goals.goal(detail_cov_penalty, 'detail_cov')
 
     group_detail_stats = geometric_mean([g_detail_mean, g_detail_var_mean, g_detail_cov])
 
     # GROUP F: HEALTH
     detail_contrib = (recon - recon_core).abs().mean()
-    detail_ratio = detail_contrib / (recon_core.abs().mean() + 1e-8)
+    # Larger epsilon to prevent gradient explosion when recon_core magnitude is small
+    detail_ratio = detail_contrib / torch.clamp(recon_core.abs().mean(), min=1e-2)
     g_detail_ratio = goals.goal(detail_ratio, 'detail_ratio')
 
     core_var_median, detail_var_median = mu_core.var(0).median(), mu_detail.var(0).median()

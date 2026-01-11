@@ -82,14 +82,14 @@ GOAL_SPECS = {
     'detail_edge_leak': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'}, # Δz_detail shouldn't change edges
 
     # Latent group - KL and statistical health
-    # v17d STRATEGY: Adaptive ceiling discovery
-    # Epoch 1: NO upper bound (let LBO discover natural init, just enforce lower=100)
-    # Epoch 2: Set upper = max(KL_observed_epoch_1) automatically
-    # Epoch 3+: Squeeze via KL_SQUEEZE_SCHEDULE
+    # DISCOVERY STRATEGY: No upper cap until epoch 3
+    # Epoch 1-2: NO upper constraint (healthy=1e8, upper=1e9 → effectively unlimited)
+    #            Lower=100 prevents KL collapse, but no pull toward any target value
+    # Epoch 3+: Apply KL_SQUEEZE_SCHEDULE to squeeze from discovered ceiling → 3000
     # Upper bounds prevent "high KL collapse" (all inputs → same point far from prior)
     # Lower bounds prevent "low KL collapse" (ignore latent space)
-    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 1e9, 'healthy': 3000.0, 'lower_scale': 2.0},
-    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 1e9, 'healthy': 3000.0, 'lower_scale': 2.0},
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 1e9, 'healthy': 1e8, 'lower_scale': 2.0},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 1e9, 'healthy': 1e8, 'lower_scale': 2.0},
 
     # Direct logvar constraints to prevent exp(logvar) explosion
     # logvar∈[-15,10] → std∈[0.0003, 148] → prevents numerical overflow

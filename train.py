@@ -291,13 +291,21 @@ for epoch in range(1, EPOCHS + 1):
     if epoch == 2 and goal_system.epoch1_margin_applied:
         goal_system.remove_epoch1_margin()
 
-    # v17d: Apply KL squeeze schedule (starts epoch 3, after ceiling discovery in epoch 1)
+    # v17d: Apply KL squeeze schedule (starts epoch 3, after ceiling discovery in epoch 1-2)
     if epoch in KL_SQUEEZE_SCHEDULE and epoch >= 3:  # Start squeeze from epoch 3
         new_upper = KL_SQUEEZE_SCHEDULE[epoch]
         if new_upper is not None:
-            # Update both kl_core and kl_detail upper bounds
+            # FIRST APPLICATION (epoch 3): Set healthy target to 3000 nats
+            # This activates the squeeze - epochs 1-2 had healthy=1e8 (no target)
+            if epoch == 3:
+                GOAL_SPECS['kl_core']['healthy'] = 3000.0
+                GOAL_SPECS['kl_detail']['healthy'] = 3000.0
+                print(f"🎯 KL healthy target activated: 3000 nats (squeeze begins)")
+
+            # Update upper bounds (squeeze the ceiling)
             GOAL_SPECS['kl_core']['upper'] = new_upper
             GOAL_SPECS['kl_detail']['upper'] = new_upper
+
             # Re-initialize goal system normalizers with new bounds
             goal_system.goal_specs = GOAL_SPECS
             goal_system.rebuild_normalizers()

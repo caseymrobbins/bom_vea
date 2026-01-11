@@ -21,6 +21,7 @@ LEARNING_RATE = 3e-3  # v17: INCREASED to 3e-3 (20x efficiency vs standard VAE, 
 LEARNING_RATE_D = 3e-4  # Discriminator learning rate (10x slower than main, maintains ratio)
 WEIGHT_DECAY = 1e-5
 CALIBRATION_BATCHES = 200
+MAX_GRAD_NORM = 1.0
 
 # Model
 LATENT_DIM = 128

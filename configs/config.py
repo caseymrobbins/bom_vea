@@ -131,8 +131,6 @@ GOAL_SPECS = {
     # No upper bound needed - let variance grow naturally during training
     'core_var_health': {'type': ConstraintType.LOWER, 'lower': -10.0, 'margin': 100.0},
     'detail_var_health': {'type': ConstraintType.LOWER, 'lower': -10.0, 'margin': 100.0},
-    'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # v17g: Fixed scale=100.0 → auto (calibration saw p95≈494)
-    'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # v17g: Fixed scale=100.0 → auto (calibration saw p95≈577)
 }
 
 # v17d: KL Adaptive Squeeze Schedule (starts epoch 3, after ceiling discovery)

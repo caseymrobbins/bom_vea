@@ -17,7 +17,7 @@ USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during ba
 # Training
 EPOCHS = 25  # v17: Target KL=3k by epoch 15
 BATCH_SIZE = 512  # A100: 40GB VRAM (L4 used 256 with 24GB)
-LEARNING_RATE = 2e-3  # v16 rate (LBO seeks interior, not edge - barriers protect boundaries)
+LEARNING_RATE = 1e-3  # Reduced from 2e-3 to stabilize gradients with small geometric mean terms
 LEARNING_RATE_D = 2e-4  # Discriminator learning rate (10x slower than main)
 WEIGHT_DECAY = 1e-5
 CALIBRATION_BATCHES = 79  # 20% of 395 batches for CelebA

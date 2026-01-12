@@ -12,8 +12,11 @@ def make_normalizer_torch(ctype: ConstraintType, **kwargs) -> Callable:
         return lambda x: torch.clamp((margin - x) / margin, 0.0, 1.0)
     
     if ctype == ConstraintType.LOWER:
+        lower = kwargs["lower"]
         margin = kwargs["margin"]
-        return lambda x: torch.clamp((x - margin) / margin, 0.0, 1.0)
+        # Score: 0 at lower bound, 1.0 at (lower + margin) and above
+        # Linear transition: score = (x - lower) / margin, clamped to [0, 1]
+        return lambda x: torch.clamp((x - lower) / margin, 0.0, 1.0)
     
     if ctype == ConstraintType.BOX:
         lower, upper = kwargs["lower"], kwargs["upper"]

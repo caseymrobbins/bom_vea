@@ -115,7 +115,10 @@ GOAL_SPECS = {
     # v14: Detail contracts - WIDE initial bounds for feasible initialization
     # v17b: Widened bounds (observed violations: detail_mean=21.32, detail_var_mean=354.0)
     'detail_mean': {'type': ConstraintType.BOX, 'lower': -30.0, 'upper': 30.0},  # Was [-20, 20], violated by 21.32
-    'detail_var_mean': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 500.0},  # Was 350, violated by 354.0
+    # detail_var_mean: Changed BOX→LOWER to allow initialization at ~0
+    # At init, variance is near 0 - only enforce it stays above -1.0 (effectively non-negative)
+    # No upper bound needed - let it grow naturally during training
+    'detail_var_mean': {'type': ConstraintType.LOWER, 'lower': -1.0, 'margin': 10.0},
     'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # v17f: Fixed scale=1.0 → auto (calibration saw 4.9-30.7)
     'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 

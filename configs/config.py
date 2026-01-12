@@ -126,8 +126,11 @@ GOAL_SPECS = {
     # detail_ratio: Changed from BOX to MINIMIZE_SOFT - we don't need upper bound
     # Raw values reach 0.97-0.99, BOX upper=1.0 causes gradient explosion at boundary
     'detail_ratio': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
-    'core_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 1200.0},  # v17: Doubled again (600→1200)
-    'detail_var_health': {'type': ConstraintType.BOX, 'lower': 0.0, 'upper': 1200.0},  # v17: Allow 2x spreading vs v16
+    # core/detail_var_health: Changed BOX→LOWER to allow initialization at ~0 variance
+    # At init, median variance ≈ 0 - only enforce non-negative with breathing room
+    # No upper bound needed - let variance grow naturally during training
+    'core_var_health': {'type': ConstraintType.LOWER, 'lower': -10.0, 'margin': 100.0},
+    'detail_var_health': {'type': ConstraintType.LOWER, 'lower': -10.0, 'margin': 100.0},
     'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # v17g: Fixed scale=100.0 → auto (calibration saw p95≈494)
     'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # v17g: Fixed scale=100.0 → auto (calibration saw p95≈577)
 }

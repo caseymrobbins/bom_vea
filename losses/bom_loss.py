@@ -477,7 +477,35 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     # Directive #4: Discrete rollback if S_min ≤ 0
     if min_group <= 0:
         group_name = group_names[min_group_idx] if min_group_idx < len(group_names) else f"group_{min_group_idx}"
-        print(f"    [LBO BARRIER] Group '{group_name}' failed: S_min = {min_group:.6f}")
+
+        # DETAILED DIAGNOSTICS: If latent group failed, show sub-group breakdown
+        if group_name == 'latent':
+            latent_subgroups = {
+                'kl': group_kl.item(),
+                'structure': group_structure.item(),
+                'capacity': group_capacity.item(),
+                'detail_stats': group_detail_stats.item()
+            }
+            failed_subgroups = [name for name, val in latent_subgroups.items() if val <= 0]
+
+            print(f"    [LBO BARRIER] Group 'latent' failed: S_min = {min_group:.6f}")
+            print(f"    └─ Sub-groups: kl={group_kl.item():.6f}, structure={group_structure.item():.6f}, capacity={group_capacity.item():.6f}, detail_stats={group_detail_stats.item():.6f}")
+
+            if failed_subgroups:
+                print(f"    └─ Failed sub-groups: {', '.join(failed_subgroups)}")
+
+                # Show individual goals in failed sub-groups
+                if 'kl' in failed_subgroups:
+                    print(f"       KL goals: kl_core={g_kl_core.item():.6f}, kl_detail={g_kl_detail.item():.6f}, logvar_core={g_logvar_core.item():.6f}, logvar_detail={g_logvar_detail.item():.6f}")
+                if 'structure' in failed_subgroups:
+                    print(f"       Structure goals: cov={g_cov.item():.6f}, weak={g_weak.item():.6f}, consistency={g_consistency.item():.6f}")
+                if 'capacity' in failed_subgroups:
+                    print(f"       Capacity goals: core_active={g_core_active.item():.6f}, detail_active={g_detail_active.item():.6f}, core_effective={g_core_effective.item():.6f}, detail_effective={g_detail_effective.item():.6f}")
+                if 'detail_stats' in failed_subgroups:
+                    print(f"       Detail stats goals: detail_mean={g_detail_mean.item():.6f}, detail_var_mean={g_detail_var_mean.item():.6f}, detail_cov={g_detail_cov.item():.6f}, traversal={g_traversal.item():.6f}")
+        else:
+            print(f"    [LBO BARRIER] Group '{group_name}' failed: S_min = {min_group:.6f}")
+
         return None
 
     # Directive #1: Pure log barrier (NO epsilon)

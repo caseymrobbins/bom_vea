@@ -478,7 +478,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     if min_group <= 0:
         group_name = group_names[min_group_idx] if min_group_idx < len(group_names) else f"group_{min_group_idx}"
 
-        # DETAILED DIAGNOSTICS: If latent group failed, show sub-group breakdown
+        # DETAILED DIAGNOSTICS: Show sub-group/goal breakdown for hierarchical groups
         if group_name == 'latent':
             latent_subgroups = {
                 'kl': group_kl.item(),
@@ -503,6 +503,22 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
                     print(f"       Capacity goals: core_active={g_core_active.item():.6f}, detail_active={g_detail_active.item():.6f}, core_effective={g_core_effective.item():.6f}, detail_effective={g_detail_effective.item():.6f}")
                 if 'detail_stats' in failed_subgroups:
                     print(f"       Detail stats goals: detail_mean={g_detail_mean.item():.6f}, detail_var_mean={g_detail_var_mean.item():.6f}, detail_cov={g_detail_cov.item():.6f}, traversal={g_traversal.item():.6f}")
+
+        elif group_name == 'health':
+            health_goals = {
+                'detail_ratio': g_detail_ratio.item(),
+                'core_var': g_core_var.item(),
+                'detail_var': g_detail_var.item(),
+                'core_var_max': g_core_var_max.item(),
+                'detail_var_max': g_detail_var_max.item()
+            }
+            failed_goals = [name for name, val in health_goals.items() if val <= 0]
+
+            print(f"    [LBO BARRIER] Group 'health' failed: S_min = {min_group:.6f}")
+            print(f"    └─ Goals: detail_ratio={g_detail_ratio.item():.6f}, core_var={g_core_var.item():.6f}, detail_var={g_detail_var.item():.6f}, core_var_max={g_core_var_max.item():.6f}, detail_var_max={g_detail_var_max.item():.6f}")
+
+            if failed_goals:
+                print(f"    └─ Failed goals: {', '.join(failed_goals)}")
         else:
             print(f"    [LBO BARRIER] Group '{group_name}' failed: S_min = {min_group:.6f}")
 

@@ -272,6 +272,7 @@ threshold_hit_epoch = None
 previous_goal_specs = None  # For rollback if tightening is too aggressive
 
 for epoch in range(1, EPOCHS + 1):
+    global discovered_kl_ceiling  # Declare at start of loop for adaptive squeeze
     t0 = time.time()
     epoch_data = {k: [] for k in histories.keys()}
     bn_counts = {n: 0 for n in GROUP_NAMES}
@@ -726,7 +727,6 @@ for epoch in range(1, EPOCHS + 1):
 
     # v17d: At end of epoch 1, discover max KL and set as ceiling for epoch 2+
     if epoch == 1 and goal_system.calibrated:
-        global discovered_kl_ceiling
         max_kl_core = max(epoch_data['kl_core_raw']) if epoch_data['kl_core_raw'] else 0
         max_kl_detail = max(epoch_data['kl_detail_raw']) if epoch_data['kl_detail_raw'] else 0
         discovered_ceiling = max(max_kl_core, max_kl_detail)

@@ -47,6 +47,9 @@ vgg = VGGFeatures(DEVICE)
 goal_system = GoalSystem(GOAL_SPECS)
 split_idx = LATENT_DIM // 2
 
+# v17d: Store discovered KL ceiling for adaptive squeeze schedule
+discovered_kl_ceiling = None
+
 # Augmentation for consistency loss - batched on GPU
 import torchvision.transforms as T
 
@@ -291,25 +294,62 @@ for epoch in range(1, EPOCHS + 1):
     if epoch == 2 and goal_system.epoch1_margin_applied:
         goal_system.remove_epoch1_margin()
 
-    # v17d: Apply KL squeeze schedule (starts epoch 3, after ceiling discovery in epoch 1-2)
-    if epoch in KL_SQUEEZE_SCHEDULE and epoch >= 3:  # Start squeeze from epoch 3
-        new_upper = KL_SQUEEZE_SCHEDULE[epoch]
-        if new_upper is not None:
-            # FIRST APPLICATION (epoch 3): Set healthy target to 3000 nats
-            # This activates the squeeze - epochs 1-2 had healthy=1e8 (no target)
-            if epoch == 3:
-                GOAL_SPECS['kl_core']['healthy'] = 3000.0
-                GOAL_SPECS['kl_detail']['healthy'] = 3000.0
-                print(f"🎯 KL healthy target activated: 3000 nats (squeeze begins)")
+    # v17d: Adaptive KL squeeze (starts epoch 3, based on discovered ceiling)
+    if epoch >= 3:
+        if discovered_kl_ceiling is not None:
+            # ADAPTIVE SQUEEZE: Use discovered ceiling from epoch 1
+            # Calculate squeeze from discovered ceiling → 3000 over epochs 3-15
+            # Use geometric progression: constant percentage reduction per epoch
+            target_kl = 3000.0
+            squeeze_start_epoch = 3
+            squeeze_end_epoch = 15
 
-            # Update upper bounds (squeeze the ceiling)
-            GOAL_SPECS['kl_core']['upper'] = new_upper
-            GOAL_SPECS['kl_detail']['upper'] = new_upper
+            if epoch <= squeeze_end_epoch:
+                # Geometric interpolation from discovered_ceiling to target_kl
+                # At epoch 3: start from discovered ceiling
+                # At epoch 15: reach 3000
+                num_steps = squeeze_end_epoch - squeeze_start_epoch
+                step = epoch - squeeze_start_epoch
 
-            # Re-initialize goal system normalizers with new bounds
-            goal_system.goal_specs = GOAL_SPECS
-            goal_system.rebuild_normalizers()
-            print(f"🔽 KL ceiling squeezed to {new_upper:,} nats (epoch {epoch})")
+                # Geometric progression: ceiling * (target/ceiling)^(step/num_steps)
+                ratio = (target_kl / discovered_kl_ceiling) ** (step / num_steps)
+                new_upper = discovered_kl_ceiling * ratio
+
+                # FIRST APPLICATION (epoch 3): Set healthy target to 3000 nats
+                # This activates the squeeze - epochs 1-2 had healthy=1e8 (no target)
+                if epoch == 3:
+                    GOAL_SPECS['kl_core']['healthy'] = target_kl
+                    GOAL_SPECS['kl_detail']['healthy'] = target_kl
+                    print(f"🎯 KL healthy target activated: {target_kl:,.0f} nats (squeeze begins)")
+                    print(f"   Discovered ceiling: {discovered_kl_ceiling:,.0f} nats")
+                    print(f"   Adaptive squeeze: {discovered_kl_ceiling:,.0f} → {target_kl:,.0f} over epochs 3-{squeeze_end_epoch}")
+
+                # Update upper bounds (squeeze the ceiling)
+                GOAL_SPECS['kl_core']['upper'] = new_upper
+                GOAL_SPECS['kl_detail']['upper'] = new_upper
+
+                # Re-initialize goal system normalizers with new bounds
+                goal_system.goal_specs = GOAL_SPECS
+                goal_system.rebuild_normalizers()
+
+                reduction_pct = 100 * (1 - new_upper / GOAL_SPECS['kl_core'].get('upper', new_upper))
+                print(f"🔽 KL ceiling squeezed to {new_upper:,.0f} nats (epoch {epoch}, {reduction_pct:.1f}% reduction)")
+
+        elif epoch in KL_SQUEEZE_SCHEDULE:
+            # FALLBACK: Use hardcoded schedule if discovery failed
+            new_upper = KL_SQUEEZE_SCHEDULE[epoch]
+            if new_upper is not None:
+                if epoch == 3:
+                    GOAL_SPECS['kl_core']['healthy'] = 3000.0
+                    GOAL_SPECS['kl_detail']['healthy'] = 3000.0
+                    print(f"⚠️  Using fallback squeeze schedule (discovery failed)")
+                    print(f"🎯 KL healthy target activated: 3000 nats (squeeze begins)")
+
+                GOAL_SPECS['kl_core']['upper'] = new_upper
+                GOAL_SPECS['kl_detail']['upper'] = new_upper
+                goal_system.goal_specs = GOAL_SPECS
+                goal_system.rebuild_normalizers()
+                print(f"🔽 KL ceiling squeezed to {new_upper:,} nats (epoch {epoch})")
 
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
@@ -686,9 +726,11 @@ for epoch in range(1, EPOCHS + 1):
 
     # v17d: At end of epoch 1, discover max KL and set as ceiling for epoch 2+
     if epoch == 1 and goal_system.calibrated:
+        global discovered_kl_ceiling
         max_kl_core = max(epoch_data['kl_core_raw']) if epoch_data['kl_core_raw'] else 0
         max_kl_detail = max(epoch_data['kl_detail_raw']) if epoch_data['kl_detail_raw'] else 0
         discovered_ceiling = max(max_kl_core, max_kl_detail)
+        discovered_kl_ceiling = discovered_ceiling  # Store for adaptive squeeze
 
         print(f"\n🔍 EPOCH 1 KL DISCOVERY:")
         print(f"   Max KL_core:   {max_kl_core:,.1f}")

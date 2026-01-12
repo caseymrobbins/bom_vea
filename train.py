@@ -729,17 +729,23 @@ for epoch in range(1, EPOCHS + 1):
         max_kl_core = max(epoch_data['kl_core_raw']) if epoch_data['kl_core_raw'] else 0
         max_kl_detail = max(epoch_data['kl_detail_raw']) if epoch_data['kl_detail_raw'] else 0
         discovered_ceiling = max(max_kl_core, max_kl_detail)
-        discovered_kl_ceiling = discovered_ceiling  # Store for adaptive squeeze
+
+        # Add 20% headroom to prevent gradient explosion near boundaries
+        # Observed max is just one sample - natural variation could go slightly higher
+        # This keeps values away from steep gradient region (steepness=20)
+        ceiling_with_headroom = discovered_ceiling * 1.20
+        discovered_kl_ceiling = ceiling_with_headroom  # Store for adaptive squeeze
 
         print(f"\n🔍 EPOCH 1 KL DISCOVERY:")
         print(f"   Max KL_core:   {max_kl_core:,.1f}")
         print(f"   Max KL_detail: {max_kl_detail:,.1f}")
-        print(f"   Setting ceiling: {discovered_ceiling:,.1f}")
+        print(f"   Discovered ceiling: {discovered_ceiling:,.1f}")
+        print(f"   Setting upper bound: {ceiling_with_headroom:,.1f} (+20% headroom)")
 
         # Update KL bounds for epoch 2+
         if discovered_ceiling > 0:  # Only set if we have valid data
-            GOAL_SPECS['kl_core']['upper'] = discovered_ceiling
-            GOAL_SPECS['kl_detail']['upper'] = discovered_ceiling
+            GOAL_SPECS['kl_core']['upper'] = ceiling_with_headroom
+            GOAL_SPECS['kl_detail']['upper'] = ceiling_with_headroom
             goal_system.specs = GOAL_SPECS
             goal_system.rebuild_normalizers()  # Fixed: was initialize_normalizers()
             print(f"   ✓ KL ceiling will activate at start of epoch 2\n")

@@ -272,7 +272,6 @@ threshold_hit_epoch = None
 previous_goal_specs = None  # For rollback if tightening is too aggressive
 
 for epoch in range(1, EPOCHS + 1):
-    global discovered_kl_ceiling  # Declare at start of loop for adaptive squeeze
     t0 = time.time()
     epoch_data = {k: [] for k in histories.keys()}
     bn_counts = {n: 0 for n in GROUP_NAMES}

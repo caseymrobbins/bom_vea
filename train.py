@@ -862,13 +862,13 @@ for epoch in range(1, EPOCHS + 1):
     with torch.no_grad():
         # 1. Reconstruction images
         recon_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_reconstructions.png'
-        plot_reconstructions(model, fixed_samples_for_viz, SPLIT_IDX, recon_path, device=DEVICE)
+        plot_reconstructions(model, fixed_samples_for_viz, split_idx, recon_path, device=DEVICE)
         print(f"   ✓ Saved reconstructions to {recon_path}")
 
         # 2. Latent traversals (core and detail)
         traversal_core_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_traversal_core.png'
         traversal_detail_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_traversal_detail.png'
-        plot_traversals(model, fixed_samples_for_viz, SPLIT_IDX,
+        plot_traversals(model, fixed_samples_for_viz, split_idx,
                        traversal_core_path, traversal_detail_path,
                        num_dims=10, device=DEVICE)
         print(f"   ✓ Saved core traversals to {traversal_core_path}")

@@ -573,8 +573,9 @@ for epoch in range(1, EPOCHS + 1):
         loss.backward()
 
         # Clip gradients to prevent NaN propagation from extreme -log(tiny_score) derivatives
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=10.0)
+        # With per-sample LBO and KL scores ~0.0002, gradients can be ~5000x, need aggressive clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
 
         # Check gradients BEFORE step to prevent weight corruption
         # Collect info about which parameters have bad gradients BEFORE clearing
@@ -729,33 +730,32 @@ for epoch in range(1, EPOCHS + 1):
     last_good_optimizer = copy.deepcopy(optimizer.state_dict())
     last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
 
-    # v17d: At end of epoch 1, discover max KL and set as ceiling for epoch 2+
-    if epoch == 1 and goal_system.calibrated:
+    # v17d: At end of epoch 2, discover max KL and set as ceiling for epoch 3+
+    # Epochs 1-2 are for KL calibration (unbounded)
+    if epoch == 2 and goal_system.calibrated:
         max_kl_core = max(epoch_data['kl_core_raw']) if epoch_data['kl_core_raw'] else 0
         max_kl_detail = max(epoch_data['kl_detail_raw']) if epoch_data['kl_detail_raw'] else 0
         discovered_ceiling = max(max_kl_core, max_kl_detail)
 
-        # Add 20% headroom to prevent gradient explosion near boundaries
-        # Observed max is just one sample - natural variation could go slightly higher
-        # This keeps values away from steep gradient region (steepness=20)
-        ceiling_with_headroom = discovered_ceiling * 1.20
+        # Add 10% headroom as requested by user
+        ceiling_with_headroom = discovered_ceiling * 1.10
         discovered_kl_ceiling = ceiling_with_headroom  # Store for adaptive squeeze
 
-        print(f"\n🔍 EPOCH 1 KL DISCOVERY:")
+        print(f"\n🔍 EPOCH 2 KL CALIBRATION:")
         print(f"   Max KL_core:   {max_kl_core:,.1f}")
         print(f"   Max KL_detail: {max_kl_detail:,.1f}")
         print(f"   Discovered ceiling: {discovered_ceiling:,.1f}")
-        print(f"   Setting upper bound: {ceiling_with_headroom:,.1f} (+20% headroom)")
+        print(f"   Setting upper bound: {ceiling_with_headroom:,.1f} (+10% headroom)")
 
-        # Update KL bounds for epoch 2+
+        # Update KL bounds for epoch 3+
         if discovered_ceiling > 0:  # Only set if we have valid data
             GOAL_SPECS['kl_core']['upper'] = ceiling_with_headroom
             GOAL_SPECS['kl_detail']['upper'] = ceiling_with_headroom
             goal_system.specs = GOAL_SPECS
-            goal_system.rebuild_normalizers()  # Fixed: was initialize_normalizers()
-            print(f"   ✓ KL ceiling will activate at start of epoch 2\n")
+            goal_system.rebuild_normalizers()
+            print(f"   ✓ KL ceiling will activate at start of epoch 3\n")
         else:
-            print(f"   ⚠️  WARNING: No valid KL data (all rollbacks). Keeping unbounded for epoch 2.\n")
+            print(f"   ⚠️  WARNING: No valid KL data (all rollbacks). Keeping unbounded for epoch 3.\n")
 
     if all_mu_core:
         mc, md = torch.cat(all_mu_core), torch.cat(all_mu_detail)

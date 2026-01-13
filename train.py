@@ -659,7 +659,7 @@ for epoch in range(1, EPOCHS + 1):
             
             epoch_data['loss'].append(loss.item())
             epoch_data['min_group'].append(groups.min().item())
-            epoch_data['bottleneck'].append(result['min_idx'].item())
+            epoch_data['bottleneck'].append(result['min_idx'])
             epoch_data['ssim'].append(result['ssim'])
             epoch_data['mse'].append(result['mse'])
             epoch_data['edge'].append(result['edge_loss'])

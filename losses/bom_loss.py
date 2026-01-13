@@ -348,13 +348,13 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     # ========== GROUP D: REALISM (PER-SAMPLE) ==========
     # Discriminator should classify reconstructions as real
     if discriminator is not None:
-        d_recon_logits = discriminator(recon)  # [B, 1]
-        d_swap_logits = discriminator(r_sw)    # [B, 1]
+        d_recon_logits = discriminator(recon)  # [B, 1, H, W] - spatial discriminator
+        d_swap_logits = discriminator(r_sw)    # [B, 1, H, W]
 
         # Want D scores HIGH (realistic), so minimize (1 - sigmoid(D))
-        # Per-sample: [B]
-        realism_loss_recon = 1.0 - torch.sigmoid(d_recon_logits).squeeze(-1)  # [B]
-        realism_loss_swap = 1.0 - torch.sigmoid(d_swap_logits).squeeze(-1)    # [B]
+        # Per-sample: average over spatial dimensions [B]
+        realism_loss_recon = 1.0 - torch.sigmoid(d_recon_logits).mean(dim=[1, 2, 3])  # [B]
+        realism_loss_swap = 1.0 - torch.sigmoid(d_swap_logits).mean(dim=[1, 2, 3])    # [B]
 
         g_realism_recon = goals.goal(realism_loss_recon, 'realism_recon')  # [B]
         g_realism_swap = goals.goal(realism_loss_swap, 'realism_swap')      # [B]

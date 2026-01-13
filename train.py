@@ -244,7 +244,6 @@ histories = {
     'core_effective_goal': [], 'detail_effective_goal': [],
     'detail_mean_goal': [], 'detail_var_mean_goal': [], 'detail_cov_goal': [],
     'detail_ratio_goal': [], 'core_var_goal': [], 'detail_var_goal': [],
-    'core_var_max_goal': [], 'detail_var_max_goal': [],
     'core_active': [], 'detail_active': [], 'core_effective': [], 'detail_effective': [],
 }
 dim_variance_history = {'core': [], 'detail': []}
@@ -709,8 +708,6 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['detail_ratio_goal'].append(ig['detail_ratio'])
             epoch_data['core_var_goal'].append(ig['core_var'])
             epoch_data['detail_var_goal'].append(ig['detail_var'])
-            epoch_data['core_var_max_goal'].append(ig['core_var_max'])
-            epoch_data['detail_var_max_goal'].append(ig['detail_var_max'])
 
         pbar.set_postfix({
             'loss': f"{loss.item():.2f}", 'min': f"{groups.min().item():.3f}",

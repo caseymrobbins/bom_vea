@@ -240,8 +240,6 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     losses['detail_ratio'] = (detail_contrib / (recon_core.abs().mean() + 1e-8)).item()
     losses['core_var_health'] = mu_core.var(0).median().item()
     losses['detail_var_health'] = mu_detail.var(0).median().item()
-    losses['core_var_max'] = mu_core.var(0).max().item()
-    losses['detail_var_max'] = mu_detail.var(0).max().item()
 
     losses['_ssim'] = ssim_val.item()
 
@@ -531,15 +529,6 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     if not isinstance(g_detail_var, torch.Tensor) or g_detail_var.dim() == 0:
         g_detail_var = g_detail_var * torch.ones(B, device=x.device)  # [B]
 
-    core_var_max = mu_core.var(0).max()
-    detail_var_max = mu_detail.var(0).max()
-    g_core_var_max = goals.goal(core_var_max, 'core_var_max')  # scalar
-    g_detail_var_max = goals.goal(detail_var_max, 'detail_var_max')  # scalar
-    if not isinstance(g_core_var_max, torch.Tensor) or g_core_var_max.dim() == 0:
-        g_core_var_max = g_core_var_max * torch.ones(B, device=x.device)  # [B]
-    if not isinstance(g_detail_var_max, torch.Tensor) or g_detail_var_max.dim() == 0:
-        g_detail_var_max = g_detail_var_max * torch.ones(B, device=x.device)  # [B]
-
     # ========== AGGREGATE GROUPS (PER-SAMPLE) ==========
     # All groups now have shape [B]
     group_recon = geometric_mean([g_pixel, g_edge, g_perceptual])  # [B]
@@ -548,7 +537,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     group_realism = geometric_mean([g_realism_recon, g_realism_swap])  # [B]
     group_disentangle = geometric_mean([g_core_color_leak, g_detail_edge_leak])  # [B]
     group_latent = geometric_mean([group_kl, group_structure, group_capacity, group_detail_stats])  # [B]
-    group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var, g_core_var_max, g_detail_var_max])  # [B]
+    group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var])  # [B] - core_var_max/detail_var_max removed per main
 
     # Stack as [B, n_groups] for per-sample bottleneck selection
     groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_disentangle, group_latent, group_health], dim=1)  # [B, 7]
@@ -607,12 +596,10 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
                 'detail_ratio': g_detail_ratio.mean().item(),
                 'core_var': g_core_var.mean().item(),
                 'detail_var': g_detail_var.mean().item(),
-                'core_var_max': g_core_var_max.mean().item(),
-                'detail_var_max': g_detail_var_max.mean().item()
             }
             failed_goals = [name for name, val in health_goals.items() if val <= 0]
 
-            print(f"    └─ Goals (batch mean): detail_ratio={health_goals['detail_ratio']:.6f}, core_var={health_goals['core_var']:.6f}, detail_var={health_goals['detail_var']:.6f}, core_var_max={health_goals['core_var_max']:.6f}, detail_var_max={health_goals['detail_var_max']:.6f}")
+            print(f"    └─ Goals (batch mean): detail_ratio={health_goals['detail_ratio']:.6f}, core_var={health_goals['core_var']:.6f}, detail_var={health_goals['detail_var']:.6f}")
 
             if failed_goals:
                 print(f"    └─ Failed goals: {', '.join(failed_goals)}")
@@ -654,7 +641,6 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'detail_mean': g_detail_mean.mean().item(), 'detail_var_mean': g_detail_var_mean.mean().item(), 'detail_cov': g_detail_cov.mean().item(),
         'detail_ratio': g_detail_ratio.mean().item(),
         'core_var': g_core_var.mean().item(), 'detail_var': g_detail_var.mean().item(),
-        'core_var_max': g_core_var_max.mean().item(), 'detail_var_max': g_detail_var_max.mean().item(),
     }
 
     # groups is [B, 7] - compute batch mean per group
@@ -667,7 +653,6 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'core_effective_raw': core_effective.item(), 'detail_effective_raw': detail_effective.item(),
         'detail_ratio_raw': detail_ratio.item(),
         'core_var_raw': core_var_median.item(), 'detail_var_raw': detail_var_median.item(),
-        'core_var_max_raw': core_var_max.item(), 'detail_var_max_raw': detail_var_max.item(),
         'structure_loss': structure_loss.mean().item(),
         'appearance_loss': appearance_loss.mean().item(),
         'color_hist_loss': color_hist_loss.mean().item(),

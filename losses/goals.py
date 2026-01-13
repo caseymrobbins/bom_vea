@@ -33,6 +33,9 @@ def make_normalizer_torch(ctype: ConstraintType, **kwargs) -> Callable:
     if ctype == ConstraintType.BOX_ASYMMETRIC:
         lower, upper, healthy = kwargs["lower"], kwargs["upper"], kwargs["healthy"]
         dist_lower, dist_upper = healthy - lower, upper - healthy
+        eps = 1e-6
+        dist_lower = max(dist_lower, eps)
+        dist_upper = max(dist_upper, eps)
         steepness = 20.0
         def soft_asymmetric_box(x):
             below = (x - lower) / dist_lower

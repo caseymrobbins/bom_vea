@@ -568,6 +568,10 @@ for epoch in range(1, EPOCHS + 1):
         # If we get here, s_min > 0, safe to proceed with backward/step
         loss.backward()
 
+        # Clip gradients to prevent NaN propagation from extreme -log(tiny_score) derivatives
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=10.0)
+
         # Check gradients BEFORE step to prevent weight corruption
         # Collect info about which parameters have bad gradients BEFORE clearing
         bad_grad_info = []

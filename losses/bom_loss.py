@@ -84,6 +84,10 @@ def mse_per_sample_1d(pred, target):
     """MSE per sample for 1D features: [B, D] → [B]"""
     return F.mse_loss(pred, target, reduction='none').mean(dim=1)
 
+def mse_per_sample_spatial(pred, target):
+    """MSE per sample for spatial features: [B, C, H, W] → [B]"""
+    return F.mse_loss(pred, target, reduction='none').mean(dim=[1, 2, 3])
+
 def soft_active_count(var_per_dim, threshold=0.1, temperature=0.05):
     """
     Differentiable version of (var > threshold).sum()
@@ -307,7 +311,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     # Goals now vectorized: [B] → [B]
     g_pixel = goals.goal(pixel_mse_per_sample + 0.1 * (1.0 - ssim_per_sample), 'pixel')  # [B]
     g_edge = goals.goal(mse_per_sample(edges(recon), edges_x), 'edge')  # [B]
-    g_perceptual = goals.goal(mse_per_sample_1d(recon_feat, x_feat), 'perceptual')  # [B]
+    g_perceptual = goals.goal(mse_per_sample_spatial(recon_feat, x_feat), 'perceptual')  # [B] - VGG features are spatial
 
     # ========== GROUP B: CORE (PER-SAMPLE) ==========
     # Core (structure channel) should preserve structure

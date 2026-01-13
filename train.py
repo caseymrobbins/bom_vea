@@ -30,6 +30,10 @@ train_loader, data_info = load_from_config()
 model = create_model(LATENT_DIM, IMAGE_CHANNELS, DEVICE)
 discriminator = create_discriminator(IMAGE_CHANNELS, DEVICE)
 
+# Save fixed samples for epoch-end visualization
+fixed_samples_for_viz = next(iter(train_loader))[0][:16].to(DEVICE)
+print(f"Saved {fixed_samples_for_viz.shape[0]} fixed samples for visualization")
+
 # A100: Compile models for significant speedup (PyTorch 2.0+)
 if USE_TORCH_COMPILE and hasattr(torch, 'compile'):
     print("Compiling models with torch.compile (PyTorch 2.0+)...")
@@ -254,7 +258,7 @@ print("v16: LBO Constitution compliance FIXES (epoch 13-14 collapse prevented)")
 print("     - Directive #1: Pure -log(min(S_i)) - NO softmin, NO epsilon")
 print("     - Directive #3: No clamping on goals")
 print("     - Directive #4: Discrete rejection/rollback on S_min ≤ 0")
-print(f"     - Directive #6 FIX: Adaptive squeeze 10%/8%/6% (was 5%/4%/3%) + S_min > 0.5 stability check")
+print(f"     - Directive #6 FIX: Adaptive squeeze 5% + S_min > 0.5 stability check")
 print(f"     - Backoff at {ROLLBACK_THRESHOLD_MAX*100:.0f}% (was 50%), target {ROLLBACK_THRESHOLD_TARGET*100:.0f}% rollback rate")
 print(f"     - Start tightening epoch {ADAPTIVE_TIGHTENING_START} (was 5), health bounds 2x wider")
 print("     - Behavioral disentanglement (core→structure, detail→appearance)")
@@ -851,6 +855,25 @@ for epoch in range(1, EPOCHS + 1):
                 print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")
         else:
             print()
+
+    # Generate visualizations at the end of each epoch
+    print(f"\n📸 Generating epoch {epoch} visualizations...")
+    model.eval()
+    with torch.no_grad():
+        # 1. Reconstruction images
+        recon_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_reconstructions.png'
+        plot_reconstructions(model, fixed_samples_for_viz, SPLIT_IDX, recon_path, device=DEVICE)
+        print(f"   ✓ Saved reconstructions to {recon_path}")
+
+        # 2. Latent traversals (core and detail)
+        traversal_core_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_traversal_core.png'
+        traversal_detail_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_traversal_detail.png'
+        plot_traversals(model, fixed_samples_for_viz, SPLIT_IDX,
+                       traversal_core_path, traversal_detail_path,
+                       num_dims=10, device=DEVICE)
+        print(f"   ✓ Saved core traversals to {traversal_core_path}")
+        print(f"   ✓ Saved detail traversals to {traversal_detail_path}")
+    model.train()
 
     # Adaptive tightening termination: after hitting threshold, run 1 more epoch then stop
     if threshold_hit_epoch is not None and epoch > threshold_hit_epoch:

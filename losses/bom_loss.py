@@ -19,7 +19,8 @@ def edges(img):
     """Extract edge map - captures STRUCTURE."""
     sobel_x, sobel_y = _get_sobel(img.device)
     g = img.mean(1, keepdim=True)
-    return (F.conv2d(g, sobel_x, padding=1).pow(2) + F.conv2d(g, sobel_y, padding=1).pow(2)).sqrt()
+    edge_energy = F.conv2d(g, sobel_x, padding=1).pow(2) + F.conv2d(g, sobel_y, padding=1).pow(2)
+    return torch.sqrt(edge_energy + 1e-12)
 
 def mean_color(img):
     """Global mean color per channel - captures overall APPEARANCE."""
@@ -129,9 +130,10 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
 
     # Structure
     z_c = z_core - z_core.mean(0, keepdim=True)
-    cov = (z_c.T @ z_c) / (B - 1 + 1e-8)
-    diag = torch.diag(cov) + 1e-8
-    losses['cov'] = ((cov.pow(2).sum() - diag.pow(2).sum()) / diag.pow(2).sum()).item()
+    cov = (z_c.T @ z_c) / (B - 1 + 1e-2)
+    diag = torch.diag(cov) + 1e-2
+    cov_penalty = (cov.pow(2).sum() - diag.pow(2).sum()) / torch.clamp(diag.pow(2).sum(), min=1e-1)
+    losses['cov'] = cov_penalty.item()
     losses['weak'] = (mu_core.var(0) < 0.1).float().mean().item()
 
     if x_aug is not None:
@@ -154,10 +156,12 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     losses['core_active'] = core_inactive_ratio.item()
     losses['detail_active'] = detail_inactive_ratio.item()
 
-    core_var_norm = core_var_per_dim / (core_var_per_dim.sum() + 1e-8) + 1e-8
-    detail_var_norm = detail_var_per_dim / (detail_var_per_dim.sum() + 1e-8) + 1e-8
-    core_effective = torch.exp(-torch.sum(core_var_norm * torch.log(core_var_norm)))
-    detail_effective = torch.exp(-torch.sum(detail_var_norm * torch.log(detail_var_norm)))
+    core_var_norm = core_var_per_dim / (core_var_per_dim.sum() + 1e-2) + 1e-2
+    detail_var_norm = detail_var_per_dim / (detail_var_per_dim.sum() + 1e-2) + 1e-2
+    core_var_norm_safe = torch.clamp(core_var_norm, min=1e-2, max=1.0)
+    detail_var_norm_safe = torch.clamp(detail_var_norm, min=1e-2, max=1.0)
+    core_effective = torch.exp(-torch.sum(core_var_norm_safe * torch.log(core_var_norm_safe)))
+    detail_effective = torch.exp(-torch.sum(detail_var_norm_safe * torch.log(detail_var_norm_safe)))
 
     core_ineffective_ratio = (total_dims - core_effective) / total_dims
     detail_ineffective_ratio = (total_dims - detail_effective) / total_dims
@@ -169,9 +173,10 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     losses['detail_var_mean'] = mu_detail.var(0).mean().item()
 
     z_d = z_detail - z_detail.mean(0, keepdim=True)
-    cov_d = (z_d.T @ z_d) / (B - 1 + 1e-8)
-    diag_d = torch.diag(cov_d) + 1e-8
-    losses['detail_cov'] = ((cov_d.pow(2).sum() - diag_d.pow(2).sum()) / diag_d.pow(2).sum()).item()
+    cov_d = (z_d.T @ z_d) / (B - 1 + 1e-2)
+    diag_d = torch.diag(cov_d) + 1e-2
+    detail_cov_penalty = (cov_d.pow(2).sum() - diag_d.pow(2).sum()) / torch.clamp(diag_d.pow(2).sum(), min=1e-1)
+    losses['detail_cov'] = detail_cov_penalty.item()
 
     # Disentangle
     with torch.no_grad():
@@ -192,8 +197,8 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     core_edge_shift = F.mse_loss(edges(recon_pert_core), edges(recon))
     detail_color_shift = F.mse_loss(mean_color(recon_pert_detail), mean_color(recon))
     traversal_loss = 0.5 * (
-        1.0 / (core_edge_shift + 1e-4) +
-        1.0 / (detail_color_shift + 1e-4)
+        1.0 / (core_edge_shift + 1e-2) +
+        1.0 / (detail_color_shift + 1e-2)
     )
     losses['traversal'] = traversal_loss.item()
     losses['traversal_core_effect'] = core_edge_shift.item()
@@ -201,7 +206,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
 
     # Health
     detail_contrib = (recon - recon_core).abs().mean()
-    losses['detail_ratio'] = (detail_contrib / (recon_core.abs().mean() + 1e-8)).item()
+    losses['detail_ratio'] = (detail_contrib / torch.clamp(recon_core.abs().mean(), min=1e-2)).item()
     losses['core_var_health'] = mu_core.var(0).median().item()
     losses['detail_var_health'] = mu_detail.var(0).median().item()
     losses['core_var_max'] = mu_core.var(0).max().item()

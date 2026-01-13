@@ -7,51 +7,67 @@ from typing import Dict, Callable
 from configs.config import ConstraintType
 
 def make_normalizer_torch(ctype: ConstraintType, **kwargs) -> Callable:
+    """
+    LBO-VAE score functions: Convert energies e_i to success scores s_i ∈ (0, 1]
+
+    KEY PRINCIPLE: NO CLAMPING of scores - let exponentials naturally decay
+    Clamping creates zero-gradient regions that break hard gradient routing
+    """
     if ctype == ConstraintType.UPPER:
         margin = kwargs["margin"]
-        return lambda x: torch.clamp((margin - x) / margin, 0.0, 1.0)
-    
+        # Pure exponential decay: s = exp(-(x - margin) / margin) when x > margin
+        # Inside margin: s = 1.0 (perfect score)
+        return lambda x: torch.where(x <= margin, torch.ones_like(x), torch.exp(-(x - margin) / margin))
+
     if ctype == ConstraintType.LOWER:
         lower = kwargs["lower"]
         margin = kwargs["margin"]
-        # Score: 0 at lower bound, 1.0 at (lower + margin) and above
-        # Linear transition: score = (x - lower) / margin, clamped to [0, 1]
-        return lambda x: torch.clamp((x - lower) / margin, 0.0, 1.0)
-    
+        # Pure exponential growth: s = exp((x - lower) / margin) when x < lower
+        # Above threshold: s = 1.0 (perfect score)
+        threshold = lower + margin
+        return lambda x: torch.where(x >= threshold, torch.ones_like(x), torch.exp((x - lower) / margin))
+
     if ctype == ConstraintType.BOX:
         lower, upper = kwargs["lower"], kwargs["upper"]
         mid = (lower + upper) / 2
         half_width = (upper - lower) / 2
-        steepness = 20.0
+        steepness = 2.0  # Reduced from 20.0 to prevent gradient explosion
         def soft_box(x):
             dist = torch.abs(x - mid) / half_width
+            # Inside box: linear decay from 1.0 at center to 0 at boundaries
             inside = 1.0 - dist
+            # Outside box: exponential decay (NO CLAMP)
             outside = torch.exp(-steepness * (dist - 1.0))
             return torch.where(dist <= 1.0, inside, outside)
         return soft_box
-    
+
     if ctype == ConstraintType.BOX_ASYMMETRIC:
         lower, upper, healthy = kwargs["lower"], kwargs["upper"], kwargs["healthy"]
         dist_lower, dist_upper = healthy - lower, upper - healthy
-        steepness = 20.0
+        steepness = 2.0  # Reduced from 20.0 to prevent gradient explosion
         def soft_asymmetric_box(x):
+            # Inside box: linear interpolation from boundaries to healthy point
             below = (x - lower) / dist_lower
             above = (upper - x) / dist_upper
             inside = torch.where(x <= healthy, below, above)
+            # Outside box: exponential decay (NO CLAMP)
             left_tail = torch.exp(-steepness * (lower - x) / dist_lower)
             right_tail = torch.exp(-steepness * (x - upper) / dist_upper)
             outside = torch.where(x < lower, left_tail, right_tail)
             return torch.where((x >= lower) & (x <= upper), inside, outside)
         return soft_asymmetric_box
-    
+
     if ctype == ConstraintType.MINIMIZE_SOFT:
         scale = max(kwargs["scale"], 5e-4)  # Enforce minimum scale to prevent numerical instability
-        return lambda x: torch.exp(-torch.clamp(x, min=0.0) / scale)
-    
+        # NO CLAMP: s = exp(-x / τ) - pure failure energy mapping
+        # Negative energies → scores > 1 (better than expected)
+        return lambda x: torch.exp(-x / scale)
+
     if ctype == ConstraintType.MINIMIZE_HARD:
         scale = kwargs.get("scale", 1.0)
-        return lambda x: 1.0 / (1.0 + (torch.clamp(x, min=0.0) / scale) ** 2)
-    
+        # NO CLAMP: Rational function handles all real values
+        return lambda x: 1.0 / (1.0 + (x / scale) ** 2)
+
     raise ValueError(f"Unknown constraint type: {ctype}")
 
 class GoalSystem:
@@ -202,8 +218,10 @@ class GoalSystem:
         self.samples = {name: [] for name in self.specs.keys()}
     
     def goal(self, value: torch.Tensor, name: str) -> torch.Tensor:
+        """Convert raw energy to success score (NO CLAMP)"""
         if name not in self.normalizers:
-            return 1.0 / (1.0 + torch.clamp(value, min=0.0))
+            # Fallback: rational function (NO CLAMP)
+            return 1.0 / (1.0 + value)
         return self.normalizers[name](value)
     
     def start_recalibration(self):
@@ -262,19 +280,36 @@ def geometric_mean(goals):
     LBO COMPLIANCE (Directive #4):
     - NO CLAMP! If any goal ≤ 0, this returns 0 to trigger discrete rollback
     - Clamping would artificially inflate failed constraints, preventing rollback
-    """
-    goals = torch.stack(goals)
 
-    # LBO: NO CLAMP - let goals naturally reach 0 to trigger rollback
+    Args:
+        goals: List of tensors, each can be scalar or [B]
+
+    Returns:
+        Tensor: scalar if all inputs scalar, [B] if any input is [B]
+    """
+    # Stack as [n_goals, ...] - preserves per-sample structure if present
+    goals = torch.stack(goals)  # [n_goals] or [n_goals, B]
+
+    # LBO: NO CLAMP - let goals naturally reach 0 to trigger discrete rollback
     # Check if any goal is ≤ 0 BEFORE log (discrete rollback)
     if (goals <= 0).any():
-        return torch.tensor(0.0, device=goals.device, requires_grad=True)
+        # Return zeros with same shape as output
+        if goals.dim() == 1:
+            # All scalars → scalar output
+            return torch.tensor(0.0, device=goals.device, requires_grad=True)
+        else:
+            # Has batch dimension → [B] output
+            return torch.zeros(goals.shape[1], device=goals.device, requires_grad=True)
 
     # Compute geometric mean in log space: exp(mean(log(goals)))
     log_goals = torch.log(goals)
 
     # Check for -inf from log() of very small positive values
     if torch.isinf(log_goals).any():
-        return torch.tensor(0.0, device=goals.device, requires_grad=True)
+        if goals.dim() == 1:
+            return torch.tensor(0.0, device=goals.device, requires_grad=True)
+        else:
+            return torch.zeros(goals.shape[1], device=goals.device, requires_grad=True)
 
-    return torch.exp(log_goals.mean())
+    # Mean over goals (dim 0), preserve batch dimension if present
+    return torch.exp(log_goals.mean(dim=0))

@@ -30,6 +30,10 @@ train_loader, data_info = load_from_config()
 model = create_model(LATENT_DIM, IMAGE_CHANNELS, DEVICE)
 discriminator = create_discriminator(IMAGE_CHANNELS, DEVICE)
 
+# Save fixed samples for epoch-end visualization
+fixed_samples_for_viz = next(iter(train_loader))[0][:16].to(DEVICE)
+print(f"Saved {fixed_samples_for_viz.shape[0]} fixed samples for visualization")
+
 # A100: Compile models for significant speedup (PyTorch 2.0+)
 if USE_TORCH_COMPILE and hasattr(torch, 'compile'):
     print("Compiling models with torch.compile (PyTorch 2.0+)...")
@@ -244,7 +248,6 @@ histories = {
     'core_effective_goal': [], 'detail_effective_goal': [],
     'detail_mean_goal': [], 'detail_var_mean_goal': [], 'detail_cov_goal': [],
     'detail_ratio_goal': [], 'core_var_goal': [], 'detail_var_goal': [],
-    'core_var_max_goal': [], 'detail_var_max_goal': [],
     'core_active': [], 'detail_active': [], 'core_effective': [], 'detail_effective': [],
 }
 dim_variance_history = {'core': [], 'detail': []}
@@ -255,7 +258,7 @@ print("v16: LBO Constitution compliance FIXES (epoch 13-14 collapse prevented)")
 print("     - Directive #1: Pure -log(min(S_i)) - NO softmin, NO epsilon")
 print("     - Directive #3: No clamping on goals")
 print("     - Directive #4: Discrete rejection/rollback on S_min ≤ 0")
-print(f"     - Directive #6 FIX: Adaptive squeeze 10%/8%/6% (was 5%/4%/3%) + S_min > 0.5 stability check")
+print(f"     - Directive #6 FIX: Adaptive squeeze 5% + S_min > 0.5 stability check")
 print(f"     - Backoff at {ROLLBACK_THRESHOLD_MAX*100:.0f}% (was 50%), target {ROLLBACK_THRESHOLD_TARGET*100:.0f}% rollback rate")
 print(f"     - Start tightening epoch {ADAPTIVE_TIGHTENING_START} (was 5), health bounds 2x wider")
 print("     - Behavioral disentanglement (core→structure, detail→appearance)")
@@ -272,7 +275,6 @@ threshold_hit_epoch = None
 previous_goal_specs = None  # For rollback if tightening is too aggressive
 
 for epoch in range(1, EPOCHS + 1):
-    global discovered_kl_ceiling  # Declare at start of loop for adaptive squeeze
     t0 = time.time()
     epoch_data = {k: [] for k in histories.keys()}
     bn_counts = {n: 0 for n in GROUP_NAMES}
@@ -570,6 +572,11 @@ for epoch in range(1, EPOCHS + 1):
         # If we get here, s_min > 0, safe to proceed with backward/step
         loss.backward()
 
+        # Clip gradients to prevent NaN propagation from extreme -log(tiny_score) derivatives
+        # With per-sample LBO and KL scores ~0.0002, gradients can be ~5000x, need aggressive clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+
         # Check gradients BEFORE step to prevent weight corruption
         # Collect info about which parameters have bad gradients BEFORE clearing
         bad_grad_info = []
@@ -660,7 +667,7 @@ for epoch in range(1, EPOCHS + 1):
             
             epoch_data['loss'].append(loss.item())
             epoch_data['min_group'].append(groups.min().item())
-            epoch_data['bottleneck'].append(result['min_idx'].item())
+            epoch_data['bottleneck'].append(result['min_idx'])
             epoch_data['ssim'].append(result['ssim'])
             epoch_data['mse'].append(result['mse'])
             epoch_data['edge'].append(result['edge_loss'])
@@ -680,7 +687,7 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['color_hist_loss'].append(rv['color_hist_loss'])
             
             for n in GROUP_NAMES: epoch_data[f'group_{n}'].append(gv[n])
-            bn_counts[GROUP_NAMES[result['min_idx'].item()]] += 1
+            bn_counts[GROUP_NAMES[result['min_idx']]] += 1
             
             epoch_data['pixel'].append(ig['pixel'])
             epoch_data['edge_goal'].append(ig['edge'])
@@ -710,12 +717,10 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['detail_ratio_goal'].append(ig['detail_ratio'])
             epoch_data['core_var_goal'].append(ig['core_var'])
             epoch_data['detail_var_goal'].append(ig['detail_var'])
-            epoch_data['core_var_max_goal'].append(ig['core_var_max'])
-            epoch_data['detail_var_max_goal'].append(ig['detail_var_max'])
 
         pbar.set_postfix({
             'loss': f"{loss.item():.2f}", 'min': f"{groups.min().item():.3f}",
-            'bn': GROUP_NAMES[result['min_idx'].item()], 'ssim': f"{result['ssim']:.3f}",
+            'bn': GROUP_NAMES[result['min_idx']], 'ssim': f"{result['ssim']:.3f}",
         })
 
     scheduler.step()
@@ -725,27 +730,32 @@ for epoch in range(1, EPOCHS + 1):
     last_good_optimizer = copy.deepcopy(optimizer.state_dict())
     last_good_optimizer_d = copy.deepcopy(optimizer_d.state_dict())
 
-    # v17d: At end of epoch 1, discover max KL and set as ceiling for epoch 2+
-    if epoch == 1 and goal_system.calibrated:
+    # v17d: At end of epoch 2, discover max KL and set as ceiling for epoch 3+
+    # Epochs 1-2 are for KL calibration (unbounded)
+    if epoch == 2 and goal_system.calibrated:
         max_kl_core = max(epoch_data['kl_core_raw']) if epoch_data['kl_core_raw'] else 0
         max_kl_detail = max(epoch_data['kl_detail_raw']) if epoch_data['kl_detail_raw'] else 0
         discovered_ceiling = max(max_kl_core, max_kl_detail)
-        discovered_kl_ceiling = discovered_ceiling  # Store for adaptive squeeze
 
-        print(f"\n🔍 EPOCH 1 KL DISCOVERY:")
+        # Add 10% headroom as requested by user
+        ceiling_with_headroom = discovered_ceiling * 1.10
+        discovered_kl_ceiling = ceiling_with_headroom  # Store for adaptive squeeze
+
+        print(f"\n🔍 EPOCH 2 KL CALIBRATION:")
         print(f"   Max KL_core:   {max_kl_core:,.1f}")
         print(f"   Max KL_detail: {max_kl_detail:,.1f}")
-        print(f"   Setting ceiling: {discovered_ceiling:,.1f}")
+        print(f"   Discovered ceiling: {discovered_ceiling:,.1f}")
+        print(f"   Setting upper bound: {ceiling_with_headroom:,.1f} (+10% headroom)")
 
-        # Update KL bounds for epoch 2+
+        # Update KL bounds for epoch 3+
         if discovered_ceiling > 0:  # Only set if we have valid data
-            GOAL_SPECS['kl_core']['upper'] = discovered_ceiling
-            GOAL_SPECS['kl_detail']['upper'] = discovered_ceiling
+            GOAL_SPECS['kl_core']['upper'] = ceiling_with_headroom
+            GOAL_SPECS['kl_detail']['upper'] = ceiling_with_headroom
             goal_system.specs = GOAL_SPECS
-            goal_system.rebuild_normalizers()  # Fixed: was initialize_normalizers()
-            print(f"   ✓ KL ceiling will activate at start of epoch 2\n")
+            goal_system.rebuild_normalizers()
+            print(f"   ✓ KL ceiling will activate at start of epoch 3\n")
         else:
-            print(f"   ⚠️  WARNING: No valid KL data (all rollbacks). Keeping unbounded for epoch 2.\n")
+            print(f"   ⚠️  WARNING: No valid KL data (all rollbacks). Keeping unbounded for epoch 3.\n")
 
     if all_mu_core:
         mc, md = torch.cat(all_mu_core), torch.cat(all_mu_detail)
@@ -845,6 +855,25 @@ for epoch in range(1, EPOCHS + 1):
                 print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")
         else:
             print()
+
+    # Generate visualizations at the end of each epoch
+    print(f"\n📸 Generating epoch {epoch} visualizations...")
+    model.eval()
+    with torch.no_grad():
+        # 1. Reconstruction images
+        recon_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_reconstructions.png'
+        plot_reconstructions(model, fixed_samples_for_viz, split_idx, recon_path, device=DEVICE)
+        print(f"   ✓ Saved reconstructions to {recon_path}")
+
+        # 2. Latent traversals (core and detail)
+        traversal_core_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_traversal_core.png'
+        traversal_detail_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_traversal_detail.png'
+        plot_traversals(model, fixed_samples_for_viz, split_idx,
+                       traversal_core_path, traversal_detail_path,
+                       num_dims=10, device=DEVICE)
+        print(f"   ✓ Saved core traversals to {traversal_core_path}")
+        print(f"   ✓ Saved detail traversals to {traversal_detail_path}")
+    model.train()
 
     # Adaptive tightening termination: after hitting threshold, run 1 more epoch then stop
     if threshold_hit_epoch is not None and epoch > threshold_hit_epoch:

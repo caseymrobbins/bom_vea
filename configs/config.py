@@ -7,8 +7,9 @@ import torch
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 if torch.cuda.is_available():
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    # Use new TF32 API (PyTorch 2.9+)
+    torch.backends.cudnn.conv.fp32_precision = 'tf32'
+    torch.backends.cuda.matmul.fp32_precision = 'tf32'
     torch.set_float32_matmul_precision('high')
 
 # GPU Optimizations
@@ -17,7 +18,7 @@ USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during ba
 # Training
 EPOCHS = 25  # v17: Target KL=3k by epoch 15
 BATCH_SIZE = 512  # A100: 40GB VRAM (L4 used 256 with 24GB)
-LEARNING_RATE = 2e-3  # v16 rate (LBO seeks interior, not edge - barriers protect boundaries)
+LEARNING_RATE = 1e-3  # Reduced from 2e-3 to stabilize gradients with small geometric mean terms
 LEARNING_RATE_D = 2e-4  # Discriminator learning rate (10x slower than main)
 WEIGHT_DECAY = 1e-5
 CALIBRATION_BATCHES = 79  # 20% of 395 batches for CelebA
@@ -131,8 +132,6 @@ GOAL_SPECS = {
     # No upper bound needed - let variance grow naturally during training
     'core_var_health': {'type': ConstraintType.LOWER, 'lower': -10.0, 'margin': 100.0},
     'detail_var_health': {'type': ConstraintType.LOWER, 'lower': -10.0, 'margin': 100.0},
-    'core_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # v17g: Fixed scale=100.0 → auto (calibration saw p95≈494)
-    'detail_var_max': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # v17g: Fixed scale=100.0 → auto (calibration saw p95≈577)
 }
 
 # v17d: KL Adaptive Squeeze Schedule (starts epoch 3, after ceiling discovery)

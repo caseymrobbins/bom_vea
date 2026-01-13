@@ -679,7 +679,7 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['color_hist_loss'].append(rv['color_hist_loss'])
             
             for n in GROUP_NAMES: epoch_data[f'group_{n}'].append(gv[n])
-            bn_counts[GROUP_NAMES[result['min_idx'].item()]] += 1
+            bn_counts[GROUP_NAMES[result['min_idx']]] += 1
             
             epoch_data['pixel'].append(ig['pixel'])
             epoch_data['edge_goal'].append(ig['edge'])
@@ -714,7 +714,7 @@ for epoch in range(1, EPOCHS + 1):
 
         pbar.set_postfix({
             'loss': f"{loss.item():.2f}", 'min': f"{groups.min().item():.3f}",
-            'bn': GROUP_NAMES[result['min_idx'].item()], 'ssim': f"{result['ssim']:.3f}",
+            'bn': GROUP_NAMES[result['min_idx']], 'ssim': f"{result['ssim']:.3f}",
         })
 
     scheduler.step()

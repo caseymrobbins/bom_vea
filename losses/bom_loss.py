@@ -612,9 +612,12 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
         return None
 
-    # Directive #1: Pure log barrier (NO epsilon)
-    # PER-SAMPLE loss, then average: -log(min_per_sample).mean()
-    loss_per_sample = -torch.log(min_per_sample)  # [B]
+    # Directive #1: Pure log barrier with numerical stability
+    # PER-SAMPLE loss, then average: -log(max(min_per_sample, eps)).mean()
+    # Clamp min_per_sample to prevent extreme gradients during backprop through log
+    # When score ~ 0.0002, d/dx[-log(x)] = -1/x ~ -5000, causing NaN propagation
+    min_per_sample_safe = torch.clamp(min_per_sample, min=1e-3)  # Prevent extreme log gradients
+    loss_per_sample = -torch.log(min_per_sample_safe)  # [B]
     if torch.isnan(loss_per_sample).any():
         print(f"    [LOSS NaN] Found NaN in -log(min_per_sample)")
         return None

@@ -299,6 +299,14 @@ for epoch in range(1, EPOCHS + 1):
 
     # v17d: Adaptive KL squeeze (starts epoch 3, based on discovered ceiling)
     if epoch >= 3:
+        if epoch >= KL_LOWER_WARMUP_START:
+            warmup_span = max(KL_LOWER_WARMUP_END - KL_LOWER_WARMUP_START, 1)
+            warmup_step = min(max(epoch - KL_LOWER_WARMUP_START, 0), warmup_span)
+            warmup_ratio = warmup_step / warmup_span
+            kl_lower = KL_LOWER_FINAL * warmup_ratio
+        else:
+            kl_lower = 0.0
+
         if discovered_kl_ceiling is not None:
             # ADAPTIVE SQUEEZE: Use discovered ceiling from epoch 1
             # Calculate squeeze from discovered ceiling → 3000 over epochs 3-15
@@ -328,6 +336,8 @@ for epoch in range(1, EPOCHS + 1):
                     print(f"   Adaptive squeeze: {discovered_kl_ceiling:,.0f} → {target_kl:,.0f} over epochs 3-{squeeze_end_epoch}")
 
                 # Update upper bounds (squeeze the ceiling)
+                GOAL_SPECS['kl_core']['lower'] = kl_lower
+                GOAL_SPECS['kl_detail']['lower'] = kl_lower
                 GOAL_SPECS['kl_core']['upper'] = new_upper
                 GOAL_SPECS['kl_detail']['upper'] = new_upper
 
@@ -348,6 +358,8 @@ for epoch in range(1, EPOCHS + 1):
                     print(f"⚠️  Using fallback squeeze schedule (discovery failed)")
                     print(f"🎯 KL healthy target activated: 3000 nats (squeeze begins)")
 
+                GOAL_SPECS['kl_core']['lower'] = kl_lower
+                GOAL_SPECS['kl_detail']['lower'] = kl_lower
                 GOAL_SPECS['kl_core']['upper'] = new_upper
                 GOAL_SPECS['kl_detail']['upper'] = new_upper
                 goal_system.goal_specs = GOAL_SPECS

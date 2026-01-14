@@ -85,12 +85,12 @@ GOAL_SPECS = {
     # Latent group - KL and statistical health
     # DISCOVERY STRATEGY: No upper cap until epoch 3
     # Epoch 1-2: NO upper constraint (healthy=1e8, upper=1e9 → effectively unlimited)
-    #            Lower=100 prevents KL collapse, but no pull toward any target value
+    #            Lower=0 prevents hard collapse barrier during early exploration
     # Epoch 3+: Apply KL_SQUEEZE_SCHEDULE to squeeze from discovered ceiling → 3000
     # Upper bounds prevent "high KL collapse" (all inputs → same point far from prior)
     # Lower bounds prevent "low KL collapse" (ignore latent space)
-    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 1e9, 'healthy': 1e8, 'lower_scale': 2.0},
-    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 100.0, 'upper': 1e9, 'healthy': 1e8, 'lower_scale': 2.0},
+    'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 0.0, 'upper': 1e9, 'healthy': 1e8, 'lower_scale': 2.0},
+    'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 0.0, 'upper': 1e9, 'healthy': 1e8, 'lower_scale': 2.0},
 
     # Direct logvar constraints to prevent exp(logvar) explosion
     # logvar∈[-15,10] → std∈[0.0003, 148] → prevents numerical overflow
@@ -155,6 +155,11 @@ KL_SQUEEZE_SCHEDULE = {
     14: 3200,     # -200
     15: 3000,     # -200 (target reached!)
 }
+
+# KL lower-bound warmup: ramp from 0 → 100 to avoid early hard barrier collapse
+KL_LOWER_WARMUP_START = 3
+KL_LOWER_WARMUP_END = 10
+KL_LOWER_FINAL = 100.0
 
 # LBO Directive #6: Adaptive Squeeze with rollback monitoring
 # v17: Simplified to constant 5% squeeze every epoch after convergence (epoch 5)

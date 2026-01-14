@@ -12,14 +12,16 @@ def plot_group_balance(histories, group_names, output_path, title="BOM VAE"):
     ax.set_title(title); ax.legend(); ax.grid(True, alpha=0.3); ax.set_ylim(0, 1.1)
     plt.tight_layout(); plt.savefig(output_path, dpi=150); plt.close()
 
-def plot_reconstructions(model, samples, split_idx, output_path, device='cuda'):
+def plot_reconstructions(model, samples, output_path, device='cuda'):
     model.eval()
     with torch.no_grad():
         samples = samples[:16].to(device)
-        rec_f, _, _, z = model(samples)
+        rec_f, _, _, z_parts, _ = model(samples)
         rec_f = torch.clamp(rec_f, 0, 1)
-        z_co = z.clone(); z_co[:, split_idx:] = 0
-        rec_c = torch.clamp(model.decode(z_co), 0, 1)
+        z_structure = model.structure_latents(z_parts)
+        z_appearance = model.appearance_latents(z_parts)
+        z_core_only = torch.cat([z_structure, torch.zeros_like(z_appearance)], dim=1)
+        rec_c = torch.clamp(model.decode(z_core_only), 0, 1)
         detail = torch.clamp((rec_f - rec_c).abs() * 5, 0, 1)
         
         fig, axs = plt.subplots(4, 16, figsize=(20, 5.5))
@@ -34,15 +36,17 @@ def plot_reconstructions(model, samples, split_idx, output_path, device='cuda'):
         axs[3,0].set_ylabel('Detail×5', fontsize=10)
         plt.tight_layout(); plt.savefig(output_path, dpi=150); plt.close()
 
-def plot_cross_reconstruction(model, samples, split_idx, output_path, device='cuda'):
+def plot_cross_reconstruction(model, samples, output_path, device='cuda'):
     """v13: Show structure from x1, appearance from x2."""
     model.eval()
     with torch.no_grad():
         n = 8
         x1, x2 = samples[:n].to(device), samples[n:2*n].to(device)
-        _, _, _, z1 = model(x1)
-        _, _, _, z2 = model(x2)
-        z_sw = torch.cat([z1[:, :split_idx], z2[:, split_idx:]], dim=1)
+        _, _, _, z1_parts, _ = model(x1)
+        _, _, _, z2_parts, _ = model(x2)
+        z1_structure = model.structure_latents(z1_parts)
+        z2_appearance = model.appearance_latents(z2_parts)
+        z_sw = torch.cat([z1_structure, z2_appearance], dim=1)
         r_sw = torch.clamp(model.decode(z_sw), 0, 1)
         
         fig, axs = plt.subplots(3, n, figsize=(n*2.5, 8))
@@ -56,11 +60,13 @@ def plot_cross_reconstruction(model, samples, split_idx, output_path, device='cu
         axs[2,0].set_ylabel('result', fontsize=10)
         plt.tight_layout(); plt.savefig(output_path, dpi=150); plt.close()
 
-def plot_traversals(model, sample, split_idx, output_path_core, output_path_detail, num_dims=15, device='cuda'):
+def plot_traversals(model, sample, output_path_core, output_path_detail, num_dims=15, device='cuda'):
     model.eval()
     with torch.no_grad():
-        mu, _ = model.encode(sample[:1].to(device))
+        mu_parts, _ = model.encode(sample[:1].to(device))
+        mu = model.concat_latents(mu_parts)
         scales = np.linspace(-3, 3, 11)
+        split_idx = model.structure_dim
         for prefix, offset, path, title in [
             ('Core', 0, output_path_core, 'Core Traversals (STRUCTURE)'), 
             ('Detail', split_idx, output_path_detail, 'Detail Traversals (APPEARANCE)')

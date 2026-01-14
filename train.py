@@ -49,7 +49,15 @@ scheduler_d = optim.lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=EPOCHS, et
 
 vgg = VGGFeatures(DEVICE)
 goal_system = GoalSystem(GOAL_SPECS)
-split_idx = LATENT_DIM // 2
+
+def structure_latents(latents):
+    return torch.cat([latents["core"], latents["mid"]], dim=1)
+
+def appearance_latents(latents):
+    return torch.cat([latents["detail"], latents["resid"]], dim=1)
+
+def check_latent_dict(latents):
+    return all(check_tensor(t) for t in latents.values())
 
 # v17d: Store discovered KL ceiling for adaptive squeeze schedule
 discovered_kl_ceiling = None
@@ -394,12 +402,14 @@ for epoch in range(1, EPOCHS + 1):
 
                 # Check if encoder produces NaN
                 test_mu, test_logvar = model.encode(x)
-                print(f"   Encoder mu: min={test_mu.min():.4f}, max={test_mu.max():.4f}, has_nan={torch.isnan(test_mu).any()}")
-                print(f"   Encoder logvar: min={test_logvar.min():.4f}, max={test_logvar.max():.4f}, has_nan={torch.isnan(test_logvar).any()}")
+                test_mu_full = model.concat_latents(test_mu)
+                test_logvar_full = model.concat_latents(test_logvar)
+                print(f"   Encoder mu: min={test_mu_full.min():.4f}, max={test_mu_full.max():.4f}, has_nan={torch.isnan(test_mu_full).any()}")
+                print(f"   Encoder logvar: min={test_logvar_full.min():.4f}, max={test_logvar_full.max():.4f}, has_nan={torch.isnan(test_logvar_full).any()}")
 
-                if not torch.isnan(test_mu).any() and not torch.isnan(test_logvar).any():
+                if not torch.isnan(test_mu_full).any() and not torch.isnan(test_logvar_full).any():
                     # Encoder is fine, check reparameterize
-                    test_z = model.reparameterize(test_mu, test_logvar)
+                    _, test_z = model.reparameterize(test_mu, test_logvar)
                     print(f"   Reparameterize z: min={test_z.min():.4f}, max={test_z.max():.4f}, has_nan={torch.isnan(test_z).any()}")
 
                     if not torch.isnan(test_z).any():
@@ -408,10 +418,20 @@ for epoch in range(1, EPOCHS + 1):
                         print(f"   Decoder recon: min={test_recon.min():.4f}, max={test_recon.max():.4f}, has_nan={torch.isnan(test_recon).any()}")
 
         optimizer.zero_grad(set_to_none=True)
-        recon, mu, logvar, z = model(x)
-        if not all([check_tensor(t) for t in [recon, mu, logvar, z]]):
-            print(f"    [FORWARD FAILURE] Bad tensors: "
-                  f"{', '.join(name for name, t in [('recon', recon), ('mu', mu), ('logvar', logvar), ('z', z)] if not check_tensor(t))}")
+        recon, mu, logvar, z_parts, z = model(x)
+        if not all([check_tensor(t) for t in [recon, z]]) or not all([check_latent_dict(t) for t in [mu, logvar, z_parts]]):
+            bad = []
+            if not check_tensor(recon):
+                bad.append("recon")
+            if not check_tensor(z):
+                bad.append("z")
+            if not check_latent_dict(mu):
+                bad.append("mu")
+            if not check_latent_dict(logvar):
+                bad.append("logvar")
+            if not check_latent_dict(z_parts):
+                bad.append("z_parts")
+            print(f"    [FORWARD FAILURE] Bad tensors: {', '.join(bad)}")
             optimizer.zero_grad(set_to_none=True)
             skip_count += 1
             continue
@@ -452,12 +472,12 @@ for epoch in range(1, EPOCHS + 1):
 
         if needs_recal and batch_idx < CALIBRATION_BATCHES:
             with torch.no_grad():
-                raw = compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discriminator, x_aug)
+                raw = compute_raw_losses(recon, x, mu, logvar, z_parts, model, vgg, discriminator, x_aug)
                 goal_system.collect(raw)
             if not goal_system.calibrated:
                 # LBO FIX: Use actual LBO loss during calibration, not MSE
                 # This ensures calibration sees the same optimization dynamics as training
-                cal_result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
+                cal_result = grouped_bom_loss(recon, x, mu, logvar, z_parts, model, goal_system, vgg, GROUP_NAMES, discriminator, x_aug)
 
                 if cal_result is None or cal_result['groups'].min() <= 0:
                     print(f"    [CALIBRATION SKIP] Invalid LBO result at batch {batch_idx}")
@@ -485,7 +505,7 @@ for epoch in range(1, EPOCHS + 1):
             needs_recal = False
             # Note: Removed BN reset - calibration stats should be fine for LBO training
 
-        result = grouped_bom_loss(recon, x, mu, logvar, z, model, goal_system, vgg, split_idx, GROUP_NAMES, discriminator, x_aug)
+        result = grouped_bom_loss(recon, x, mu, logvar, z_parts, model, goal_system, vgg, GROUP_NAMES, discriminator, x_aug)
 
         # SINGLE SKIP DECISION POINT: Check result validity BEFORE dereferencing
         # Fix: Check result is None BEFORE accessing result['loss']
@@ -663,8 +683,8 @@ for epoch in range(1, EPOCHS + 1):
         
         if batch_idx % 10 == 0:
             with torch.no_grad():
-                all_mu_core.append(mu[:, :split_idx].cpu())
-                all_mu_detail.append(mu[:, split_idx:].cpu())
+                all_mu_core.append(structure_latents(mu).cpu())
+                all_mu_detail.append(appearance_latents(mu).cpu())
         
         # BOM: No checkpointing "last good state" - let failures be visible
         # if batch_idx % 200 == 0 and batch_idx > 0:
@@ -874,13 +894,13 @@ for epoch in range(1, EPOCHS + 1):
     with torch.no_grad():
         # 1. Reconstruction images
         recon_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_reconstructions.png'
-        plot_reconstructions(model, fixed_samples_for_viz, split_idx, recon_path, device=DEVICE)
+        plot_reconstructions(model, fixed_samples_for_viz, recon_path, device=DEVICE)
         print(f"   ✓ Saved reconstructions to {recon_path}")
 
         # 2. Latent traversals (core and detail)
         traversal_core_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_traversal_core.png'
         traversal_detail_path = f'{OUTPUT_DIR}/epoch{epoch:02d}_traversal_detail.png'
-        plot_traversals(model, fixed_samples_for_viz, split_idx,
+        plot_traversals(model, fixed_samples_for_viz,
                        traversal_core_path, traversal_detail_path,
                        num_dims=10, device=DEVICE)
         print(f"   ✓ Saved core traversals to {traversal_core_path}")
@@ -934,9 +954,9 @@ print(f"\n  MSE:   {mse_t/(cnt*3*64*64):.6f}\n  SSIM:  {np.mean(ss):.4f}\n  LPIP
 print("\nGenerating visualizations...")
 samples, _ = next(iter(train_loader))
 plot_group_balance(histories, GROUP_NAMES, f'{OUTPUT_DIR}/group_balance.png', f"BOM VAE v17 - {data_info['name']}")
-plot_reconstructions(model, samples, split_idx, f'{OUTPUT_DIR}/reconstructions.png', DEVICE)
-plot_traversals(model, samples, split_idx, f'{OUTPUT_DIR}/traversals_core.png', f'{OUTPUT_DIR}/traversals_detail.png', NUM_TRAVERSE_DIMS, DEVICE)
-plot_cross_reconstruction(model, samples, split_idx, f'{OUTPUT_DIR}/cross_reconstruction.png', DEVICE)
+plot_reconstructions(model, samples, f'{OUTPUT_DIR}/reconstructions.png', DEVICE)
+plot_traversals(model, samples, f'{OUTPUT_DIR}/traversals_core.png', f'{OUTPUT_DIR}/traversals_detail.png', NUM_TRAVERSE_DIMS, DEVICE)
+plot_cross_reconstruction(model, samples, f'{OUTPUT_DIR}/cross_reconstruction.png', DEVICE)
 plot_training_history(histories, f'{OUTPUT_DIR}/training_history.png')
 
 print(f"\n✓ All saved to {OUTPUT_DIR}/")

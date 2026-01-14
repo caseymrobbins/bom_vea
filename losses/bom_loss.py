@@ -288,9 +288,9 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, 
     losses['detail_cov'] = detail_cov_penalty.item()
 
     if tc_logits is not None:
-        losses['sep_core'] = tc_logits.get('core', torch.zeros(B, device=x.device)).mean().item()
-        losses['sep_mid'] = tc_logits.get('mid', torch.zeros(B, device=x.device)).mean().item()
-        losses['sep_detail'] = tc_logits.get('detail', torch.zeros(B, device=x.device)).mean().item()
+        losses['sep_core'] = tc_logits.get('core', torch.zeros(B, device=x.device)).abs().mean().item()
+        losses['sep_mid'] = tc_logits.get('mid', torch.zeros(B, device=x.device)).abs().mean().item()
+        losses['sep_detail'] = tc_logits.get('detail', torch.zeros(B, device=x.device)).abs().mean().item()
     else:
         losses['sep_core'] = 0.0
         losses['sep_mid'] = 0.0
@@ -490,9 +490,9 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, di
 
     # ========== GROUP F: SEPARATION (PER-SAMPLE) ==========
     if tc_logits is not None:
-        sep_core = tc_logits.get('core', torch.zeros(B, device=x.device))
-        sep_mid = tc_logits.get('mid', torch.zeros(B, device=x.device))
-        sep_detail = tc_logits.get('detail', torch.zeros(B, device=x.device))
+        sep_core = tc_logits.get('core', torch.zeros(B, device=x.device)).abs()
+        sep_mid = tc_logits.get('mid', torch.zeros(B, device=x.device)).abs()
+        sep_detail = tc_logits.get('detail', torch.zeros(B, device=x.device)).abs()
     else:
         sep_core = torch.zeros(B, device=x.device)
         sep_mid = torch.zeros(B, device=x.device)

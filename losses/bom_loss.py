@@ -647,6 +647,11 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, di
     # Find the single worst score across ALL samples and ALL groups
     global_min = groups.min()  # Scalar - worst score in entire batch
 
+    # Safety check for NaN/Inf in global_min before taking log
+    if torch.isnan(global_min) or torch.isinf(global_min):
+        print(f"    [LBO BARRIER] global_min is NaN/Inf")
+        return None
+
     # Discrete rollback if global minimum ≤ 0
     if global_min <= 0:
         # Find which sample and group failed

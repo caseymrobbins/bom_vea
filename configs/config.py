@@ -10,7 +10,6 @@ if torch.cuda.is_available():
     # Use new TF32 API (PyTorch 2.9+)
     torch.backends.cudnn.conv.fp32_precision = 'tf32'
     torch.backends.cuda.matmul.fp32_precision = 'tf32'
-    torch.set_float32_matmul_precision('high')
 
 # GPU Optimizations
 USE_TORCH_COMPILE = False  # DISABLED: Causes inplace operation errors during backward pass with LBO rollback mechanism

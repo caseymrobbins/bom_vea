@@ -4,6 +4,7 @@
 
 import torch
 import torch.nn.functional as F
+from configs import config
 from losses.goals import geometric_mean
 
 _sobel_x, _sobel_y = None, None
@@ -115,6 +116,47 @@ def soft_active_count(var_per_dim, threshold=0.1, temperature=0.05):
     """
     return torch.sigmoid((var_per_dim - threshold) / temperature).sum()
 
+def block_diag_prior_kl(mu, logvar, block_size, rho):
+    """
+    KL(q(z|x) || p(z)) for a block-diagonal prior with intra-block correlation.
+
+    q is diagonal Gaussian with mean mu and log-variance logvar.
+    p is block-diagonal Gaussian with zero mean and covariance:
+        Sigma_b = (1 - rho) I + rho * 11^T for each block.
+    """
+    B, D = mu.shape
+    logvar_safe = torch.clamp(logvar, min=-30.0, max=20.0)
+    var = torch.exp(logvar_safe)
+    kl_total = torch.zeros(B, device=mu.device, dtype=mu.dtype)
+
+    start = 0
+    while start < D:
+        end = min(start + block_size, D)
+        b = end - start
+        mu_b = mu[:, start:end]
+        var_b = var[:, start:end]
+
+        denom = (1.0 - rho) + 1e-6
+        denom_corr = (1.0 - rho + rho * b) + 1e-6
+        a = 1.0 / denom
+        c = -rho / (denom * denom_corr)
+
+        sum_var = var_b.sum(dim=1)
+        sum_mu = mu_b.sum(dim=1)
+        sum_mu_sq = (mu_b.pow(2)).sum(dim=1)
+
+        trace_term = (a + c) * sum_var
+        quad_term = a * sum_mu_sq + c * sum_mu.pow(2)
+        base_log = torch.log(torch.as_tensor(1.0 - rho + 1e-6, device=mu.device, dtype=mu.dtype))
+        corr_log = torch.log(torch.as_tensor(1.0 - rho + rho * b + 1e-6, device=mu.device, dtype=mu.dtype))
+        logdet = (b - 1) * base_log + corr_log
+
+        kl_block = 0.5 * (trace_term + quad_term - b + logdet - logvar_safe[:, start:end].sum(dim=1))
+        kl_total = kl_total + kl_block
+        start = end
+
+    return kl_total
+
 def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, x_aug=None):
     """Compute all raw losses for calibration. Used to collect statistics before setting scales."""
     B = x.shape[0]
@@ -124,6 +166,8 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, 
     mu_detail = appearance_latents(mu)
     logvar_core = structure_latents(logvar)
     logvar_detail = appearance_latents(logvar)
+    mu_all = torch.cat([mu_core, mu_detail], dim=1)
+    logvar_all = torch.cat([logvar_core, logvar_detail], dim=1)
 
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
     recon_core = model.decode(z_core_only)
@@ -182,6 +226,12 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, 
     logvar_detail_safe = torch.clamp(logvar_detail, min=-30.0, max=20.0)
     kl_per_dim_detail = -0.5 * (1 + logvar_detail_safe - mu_detail.pow(2) - logvar_detail_safe.exp())
     losses['kl_detail'] = kl_per_dim_detail.sum(dim=1).mean().item()
+    losses['prior_kl'] = block_diag_prior_kl(
+        mu_all,
+        logvar_all,
+        config.PRIOR_BLOCK_SIZE,
+        config.PRIOR_INTRA_CORR
+    ).mean().item()
 
     losses['logvar_core'] = logvar_core.mean().item()
     losses['logvar_detail'] = logvar_detail.mean().item()
@@ -310,6 +360,8 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, di
     mu_detail = appearance_latents(mu)
     logvar_core = structure_latents(logvar)
     logvar_detail = appearance_latents(logvar)
+    mu_all = torch.cat([mu_core, mu_detail], dim=1)
+    logvar_all = torch.cat([logvar_core, logvar_detail], dim=1)
 
     # ========== DECODE CORE-ONLY ==========
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
@@ -440,6 +492,14 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, di
     kl_detail_val = kl_per_dim_detail.sum(dim=1)  # [B] - KL per sample
     g_kl_detail = goals.goal(kl_detail_val, 'kl_detail')  # [B]
 
+    prior_kl_val = block_diag_prior_kl(
+        mu_all,
+        logvar_all,
+        config.PRIOR_BLOCK_SIZE,
+        config.PRIOR_INTRA_CORR
+    )
+    g_prior_kl = goals.goal(prior_kl_val, 'prior_kl')  # [B]
+
     # Direct logvar constraints - BATCH LEVEL (global property)
     # Expand to [B] for consistent shape
     logvar_core_mean = logvar_core.mean()
@@ -452,7 +512,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, di
     if not isinstance(g_logvar_detail, torch.Tensor) or g_logvar_detail.dim() == 0:
         g_logvar_detail = g_logvar_detail * torch.ones(B, device=x.device)  # [B]
 
-    group_kl = geometric_mean([g_kl_core, g_kl_detail, g_logvar_core, g_logvar_detail])  # [B]
+    group_kl = geometric_mean([g_kl_core, g_kl_detail, g_prior_kl, g_logvar_core, g_logvar_detail])  # [B]
 
     # SUB-GROUP F2: STRUCTURE (Independence & Consistency) - BATCH LEVEL
     # These are global latent space properties - computed as batch scalars, expanded to [B]
@@ -671,6 +731,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, di
         'core_color_leak': g_core_color_leak.mean().item(), 'detail_edge_leak': g_detail_edge_leak.mean().item(),
         'traversal': g_traversal.mean().item(),
         'kl_core': g_kl_core.mean().item(), 'kl_detail': g_kl_detail.mean().item(),
+        'prior_kl': g_prior_kl.mean().item(),
         'logvar_core': g_logvar_core.mean().item(), 'logvar_detail': g_logvar_detail.mean().item(),
         'cov': g_cov.mean().item(), 'weak': g_weak.mean().item(),
         'consistency': g_consistency.mean().item(),
@@ -686,6 +747,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, di
 
     raw_values = {
         'kl_core_raw': kl_core_val.mean().item(), 'kl_detail_raw': kl_detail_val.mean().item(),
+        'prior_kl_raw': prior_kl_val.mean().item(),
         'logvar_core_raw': logvar_core_mean.item(), 'logvar_detail_raw': logvar_detail_mean.item(),
         'core_active_raw': core_active_count.item(), 'detail_active_raw': detail_active_count.item(),
         'core_effective_raw': core_effective.item(), 'detail_effective_raw': detail_effective.item(),

@@ -29,6 +29,8 @@ MIN_GROUP_GRAD_THRESHOLD = 1e-6  # Skip backward if S_min too small (avoids non-
 LATENT_DIM = 128
 IMAGE_SIZE = 64
 IMAGE_CHANNELS = 3
+PRIOR_BLOCK_SIZE = 8
+PRIOR_INTRA_CORR = 0.2
 
 # Data
 DATASET_NAME = 'celeba'
@@ -91,6 +93,7 @@ GOAL_SPECS = {
     # Lower bounds prevent "low KL collapse" (ignore latent space)
     'kl_core': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 0.0, 'upper': 1e9, 'healthy': 1e8, 'lower_scale': 2.0},
     'kl_detail': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 0.0, 'upper': 1e9, 'healthy': 1e8, 'lower_scale': 2.0},
+    'prior_kl': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # Direct logvar constraints to prevent exp(logvar) explosion
     # logvar∈[-15,10] → std∈[0.0003, 148] → prevents numerical overflow

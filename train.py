@@ -552,12 +552,12 @@ for epoch in range(1, EPOCHS + 1):
 
         if needs_recal and batch_idx < CALIBRATION_BATCHES:
             with torch.no_grad():
-                raw = compute_raw_losses(recon, x, mu, logvar, z_parts, model, vgg, discriminator, x_aug)
+                raw = compute_raw_losses(recon, x, mu, logvar, z_parts, model, vgg, discriminator, x_aug, tc_logits)
                 goal_system.collect(raw)
             if not goal_system.calibrated:
                 # LBO FIX: Use actual LBO loss during calibration, not MSE
                 # This ensures calibration sees the same optimization dynamics as training
-                cal_result = grouped_bom_loss(recon, x, mu, logvar, z_parts, model, goal_system, vgg, GROUP_NAMES, discriminator, x_aug)
+                cal_result = grouped_bom_loss(recon, x, mu, logvar, z_parts, model, goal_system, vgg, GROUP_NAMES, discriminator, x_aug, tc_logits)
 
                 if cal_result is None or cal_result['groups'].min() <= 0:
                     print(f"    [CALIBRATION SKIP] Invalid LBO result at batch {batch_idx}")
@@ -585,7 +585,7 @@ for epoch in range(1, EPOCHS + 1):
             needs_recal = False
             # Note: Removed BN reset - calibration stats should be fine for LBO training
 
-        result = grouped_bom_loss(recon, x, mu, logvar, z_parts, model, goal_system, vgg, GROUP_NAMES, discriminator, x_aug)
+        result = grouped_bom_loss(recon, x, mu, logvar, z_parts, model, goal_system, vgg, GROUP_NAMES, discriminator, x_aug, tc_logits)
 
         # SINGLE SKIP DECISION POINT: Check result validity BEFORE dereferencing
         # Fix: Check result is None BEFORE accessing result['loss']

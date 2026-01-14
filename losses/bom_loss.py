@@ -157,7 +157,7 @@ def block_diag_prior_kl(mu, logvar, block_size, rho):
 
     return kl_total
 
-def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, x_aug=None):
+def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, x_aug=None, tc_logits=None):
     """Compute all raw losses for calibration. Used to collect statistics before setting scales."""
     B = x.shape[0]
     z_core = structure_latents(z)
@@ -333,7 +333,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, 
     return losses
 
 
-def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, discriminator=None, x_aug=None):
+def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, discriminator=None, x_aug=None, tc_logits=None):
     """
     LBO-VAE Loss Function - Logarithmic Bottleneck Optimization
 

@@ -100,7 +100,7 @@ def soft_active_count(var_per_dim, threshold=0.1, temperature=0.05):
     """
     return torch.sigmoid((var_per_dim - threshold) / temperature).sum()
 
-def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discriminator=None, x_aug=None):
+def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discriminator=None, x_aug=None, tc_logits=None):
     """Compute all raw losses for calibration. Used to collect statistics before setting scales."""
     B = x.shape[0]
     z_core, z_detail = z[:, :split_idx], z[:, split_idx:]
@@ -168,6 +168,10 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     losses['logvar_core'] = logvar_core.mean().item()
     losses['logvar_detail'] = logvar_detail.mean().item()
 
+    logvar_safe = torch.clamp(logvar, min=-30.0, max=20.0)
+    kl_per_dim_prior = -0.5 * (1 + logvar_safe - mu.pow(2) - logvar_safe.exp())
+    losses['prior_kl'] = kl_per_dim_prior.sum(dim=1).mean().item()
+
     # Structure
     z_c = z_core - z_core.mean(0, keepdim=True)
     cov = (z_c.T @ z_c) / (B - 1 + 1e-2)
@@ -218,6 +222,15 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     detail_cov_penalty = (cov_d.pow(2).sum() - diag_d.pow(2).sum()) / torch.clamp(diag_d.pow(2).sum(), min=1e-1)
     losses['detail_cov'] = detail_cov_penalty.item()
 
+    if tc_logits is not None:
+        losses['sep_core'] = tc_logits.get('core', torch.zeros(B, device=x.device)).mean().item()
+        losses['sep_mid'] = tc_logits.get('mid', torch.zeros(B, device=x.device)).mean().item()
+        losses['sep_detail'] = tc_logits.get('detail', torch.zeros(B, device=x.device)).mean().item()
+    else:
+        losses['sep_core'] = 0.0
+        losses['sep_mid'] = 0.0
+        losses['sep_detail'] = 0.0
+
     # Disentangle
     with torch.no_grad():
         noise_scale = 0.5
@@ -255,7 +268,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     return losses
 
 
-def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None):
+def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None, tc_logits=None):
     """
     LBO-VAE Loss Function - Per-Sample Hard Gradient Routing
 
@@ -402,7 +415,21 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     )
     g_traversal = goals.goal(traversal_loss, 'traversal')  # [B]
 
-    # ========== GROUP F: LATENT (Hierarchical, PER-SAMPLE) ==========
+    # ========== GROUP F: SEPARATION (PER-SAMPLE) ==========
+    if tc_logits is not None:
+        sep_core = tc_logits.get('core', torch.zeros(B, device=x.device))
+        sep_mid = tc_logits.get('mid', torch.zeros(B, device=x.device))
+        sep_detail = tc_logits.get('detail', torch.zeros(B, device=x.device))
+    else:
+        sep_core = torch.zeros(B, device=x.device)
+        sep_mid = torch.zeros(B, device=x.device)
+        sep_detail = torch.zeros(B, device=x.device)
+
+    g_sep_core = goals.goal(sep_core, 'sep_core')  # [B]
+    g_sep_mid = goals.goal(sep_mid, 'sep_mid')  # [B]
+    g_sep_detail = goals.goal(sep_detail, 'sep_detail')  # [B]
+
+    # ========== GROUP G: LATENT (Hierarchical, PER-SAMPLE) ==========
 
     # SUB-GROUP F1: KL (Distribution Matching) - PER SAMPLE
     logvar_core_safe = torch.clamp(logvar_core, min=-30.0, max=20.0)
@@ -414,6 +441,9 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     kl_per_dim_detail = -0.5 * (1 + logvar_detail_safe - mu_detail.pow(2) - logvar_detail_safe.exp())
     kl_detail_val = kl_per_dim_detail.sum(dim=1)  # [B] - KL per sample
     g_kl_detail = goals.goal(kl_detail_val, 'kl_detail')  # [B]
+
+    prior_kl_val = kl_core_val + kl_detail_val
+    g_prior_kl = goals.goal(prior_kl_val, 'prior_kl')  # [B]
 
     # Direct logvar constraints - BATCH LEVEL (global property)
     # Expand to [B] for consistent shape
@@ -521,7 +551,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
 
     group_detail_stats = geometric_mean([g_detail_mean, g_detail_var_mean, g_detail_cov, g_traversal])  # [B]
 
-    # ========== GROUP G: HEALTH - BATCH LEVEL ==========
+    # ========== GROUP H: HEALTH - BATCH LEVEL ==========
     # Variance statistics (global properties)
     detail_contrib = (recon - recon_core).abs().mean()
     detail_ratio = detail_contrib / torch.clamp(recon_core.abs().mean(), min=1e-2)
@@ -545,11 +575,12 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     group_swap = geometric_mean([g_swap_structure, g_swap_appearance, g_swap_color_hist])  # [B]
     group_realism = geometric_mean([g_realism_recon, g_realism_swap])  # [B]
     group_disentangle = geometric_mean([g_core_color_leak, g_detail_edge_leak])  # [B]
+    group_separation = geometric_mean([g_sep_core, g_sep_mid, g_sep_detail, g_prior_kl])  # [B]
     group_latent = geometric_mean([group_kl, group_structure, group_capacity, group_detail_stats])  # [B]
     group_health = geometric_mean([g_detail_ratio, g_core_var, g_detail_var])  # [B] - core_var_max/detail_var_max removed per main
 
     # Stack as [B, n_groups] for per-sample bottleneck selection
-    groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_disentangle, group_latent, group_health], dim=1)  # [B, 7]
+    groups = torch.stack([group_recon, group_core, group_swap, group_realism, group_disentangle, group_separation, group_latent, group_health], dim=1)  # [B, 8]
 
     # ========== CHECK FOR NaN/Inf ==========
     if torch.isnan(groups).any() or torch.isinf(groups).any():
@@ -644,6 +675,8 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'realism_swap': g_realism_swap.mean().item(),
         'core_color_leak': g_core_color_leak.mean().item(), 'detail_edge_leak': g_detail_edge_leak.mean().item(),
         'traversal': g_traversal.mean().item(),
+        'sep_core': g_sep_core.mean().item(), 'sep_mid': g_sep_mid.mean().item(), 'sep_detail': g_sep_detail.mean().item(),
+        'prior_kl': g_prior_kl.mean().item(),
         'kl_core': g_kl_core.mean().item(), 'kl_detail': g_kl_detail.mean().item(),
         'logvar_core': g_logvar_core.mean().item(), 'logvar_detail': g_logvar_detail.mean().item(),
         'cov': g_cov.mean().item(), 'weak': g_weak.mean().item(),
@@ -655,7 +688,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'core_var': g_core_var.mean().item(), 'detail_var': g_detail_var.mean().item(),
     }
 
-    # groups is [B, 7] - compute batch mean per group
+    # groups is [B, 8] - compute batch mean per group
     group_values = {n: groups[:, i].mean().item() for i, n in enumerate(group_names)}
 
     raw_values = {
@@ -677,6 +710,8 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
         'traversal_detail_effect_raw': detail_color_shift.mean().item(),
         'detail_mean_raw': detail_mean_val.item(), 'detail_var_mean_raw': detail_var_mean_val.item(),
         'detail_cov_raw': detail_cov_penalty.item(),
+        'sep_core_raw': sep_core.mean().item(), 'sep_mid_raw': sep_mid.mean().item(), 'sep_detail_raw': sep_detail.mean().item(),
+        'prior_kl_raw': prior_kl_val.mean().item(),
     }
 
     return {

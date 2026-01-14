@@ -604,10 +604,10 @@ for epoch in range(1, EPOCHS + 1):
         # If we get here, s_min > 0, safe to proceed with backward/step
         loss.backward()
 
-        # Clip gradients to prevent NaN propagation from extreme -log(tiny_score) derivatives
-        # With pure LBO (global min), gradient = -1/min(all_scores) can be very large when bottleneck score is small
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+        # Pure LBO: No gradient clipping
+        # The logarithmic barrier naturally produces large gradients when constraints are violated
+        # This is the intended behavior - gradient magnitude encodes urgency to satisfy constraint
+        # Discrete rollback (s_min ≤ 0) protects against infeasible regions
 
         # Check gradients BEFORE step to prevent weight corruption
         # Collect info about which parameters have bad gradients BEFORE clearing

@@ -126,6 +126,14 @@ GOAL_SPECS = {
     'detail_cov': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},  # v17f: Fixed scale=1.0 → auto (calibration saw 4.9-30.7)
     'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
+    # Latent separation (TC discriminator outputs should be near 0 if disentangled)
+    'sep_core': {'type': ConstraintType.BOX, 'lower': -1.0, 'upper': 1.0},
+    'sep_mid': {'type': ConstraintType.BOX, 'lower': -1.0, 'upper': 1.0},
+    'sep_detail': {'type': ConstraintType.BOX, 'lower': -1.0, 'upper': 1.0},
+
+    # Total prior KL (full latent), bounds aligned with KL squeeze schedule
+    'prior_kl': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 0.0, 'upper': 1e9, 'healthy': 2e8, 'lower_scale': 2.0},
+
     # Health group - v17: WIDER variance bounds to allow latent space spreading
     # detail_ratio: Changed from BOX to MINIMIZE_SOFT - we don't need upper bound
     # Raw values reach 0.97-0.99, BOX upper=1.0 causes gradient explosion at boundary
@@ -173,4 +181,4 @@ ROLLBACK_THRESHOLD_TARGET = 0.05  # Target: 5% rollback rate (optimal squeeze)
 MIN_GROUP_STABILITY_THRESHOLD = 0.50  # Only tighten if avg min_group > 0.5 (Directive #6)
 STABILITY_WINDOW = 3  # Check last 3 epochs for stability
 
-GROUP_NAMES = ['recon', 'core', 'swap', 'realism', 'disentangle', 'latent', 'health']
+GROUP_NAMES = ['recon', 'core', 'swap', 'realism', 'disentangle', 'separation', 'latent', 'health']

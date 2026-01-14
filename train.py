@@ -16,6 +16,7 @@ from configs.config import *
 from utils.data import load_from_config
 from models.vae import create_model
 from models.discriminator import create_discriminator
+from models.tc_discriminator import create_tc_discriminator
 from models.vgg import VGGFeatures
 from losses.goals import GoalSystem
 from losses.bom_loss import compute_raw_losses, grouped_bom_loss, check_tensor
@@ -29,6 +30,17 @@ if DEVICE == 'cuda': print(f"GPU: {torch.cuda.get_device_name(0)}")
 train_loader, data_info = load_from_config()
 model = create_model(LATENT_DIM, IMAGE_CHANNELS, DEVICE)
 discriminator = create_discriminator(IMAGE_CHANNELS, DEVICE)
+tc_split = LATENT_DIM // 3
+tc_sizes = [tc_split, tc_split, LATENT_DIM - (2 * tc_split)]
+tc_slices = {
+    'core': (0, tc_sizes[0]),
+    'mid': (tc_sizes[0], tc_sizes[0] + tc_sizes[1]),
+    'detail': (tc_sizes[0] + tc_sizes[1], LATENT_DIM),
+}
+tc_discriminators = {
+    name: create_tc_discriminator(size, DEVICE)
+    for name, size in zip(tc_slices.keys(), tc_sizes)
+}
 
 # Save fixed samples for epoch-end visualization
 fixed_samples_for_viz = next(iter(train_loader))[0][:16].to(DEVICE)
@@ -39,13 +51,17 @@ if USE_TORCH_COMPILE and hasattr(torch, 'compile'):
     print("Compiling models with torch.compile (PyTorch 2.0+)...")
     model = torch.compile(model, mode='reduce-overhead')  # 'reduce-overhead' best for training
     discriminator = torch.compile(discriminator, mode='reduce-overhead')
+    tc_discriminators = {name: torch.compile(disc, mode='reduce-overhead') for name, disc in tc_discriminators.items()}
     print("Models compiled!")
 
 optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 optimizer_d = optim.AdamW(discriminator.parameters(), lr=LEARNING_RATE_D, weight_decay=WEIGHT_DECAY)
+tc_params = [p for disc in tc_discriminators.values() for p in disc.parameters()]
+optimizer_tc = optim.AdamW(tc_params, lr=LEARNING_RATE_D, weight_decay=WEIGHT_DECAY)
 
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-5)
 scheduler_d = optim.lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=EPOCHS, eta_min=1e-5)
+scheduler_tc = optim.lr_scheduler.CosineAnnealingLR(optimizer_tc, T_max=EPOCHS, eta_min=1e-5)
 
 vgg = VGGFeatures(DEVICE)
 goal_system = GoalSystem(GOAL_SPECS)
@@ -231,9 +247,28 @@ aug_transform = torch.nn.Sequential(
 def apply_augmentation(x):
     return aug_transform(x)
 
+def set_requires_grad(module, requires_grad):
+    for param in module.parameters():
+        param.requires_grad = requires_grad
+
+def permute_dims(z):
+    B, D = z.shape
+    permuted = torch.empty_like(z)
+    for d in range(D):
+        permuted[:, d] = z[torch.randperm(B, device=z.device), d]
+    return permuted
+
+def compute_tc_logits(z, tc_discriminators, tc_slices):
+    tc_logits = {}
+    for name, disc in tc_discriminators.items():
+        start, end = tc_slices[name]
+        tc_logits[name] = disc(z[:, start:end])
+    return tc_logits
+
 histories = {
     'loss': [], 'min_group': [], 'bottleneck': [], 'ssim': [], 'mse': [], 'edge': [],
     'kl_core_raw': [], 'kl_detail_raw': [],
+    'prior_kl_raw': [],
     'logvar_core_raw': [], 'logvar_detail_raw': [],
     'core_active_raw': [], 'detail_active_raw': [],
     'core_effective_raw': [], 'detail_effective_raw': [],
@@ -244,12 +279,14 @@ histories = {
     'core_color_leak_raw': [], 'detail_edge_leak_raw': [],
     'traversal_raw': [], 'traversal_core_effect_raw': [], 'traversal_detail_effect_raw': [],
     'detail_mean_raw': [], 'detail_var_mean_raw': [], 'detail_cov_raw': [],
+    'sep_core_raw': [], 'sep_mid_raw': [], 'sep_detail_raw': [],
     **{f'group_{n}': [] for n in GROUP_NAMES},
     'pixel': [], 'edge_goal': [], 'perceptual': [],
     'core_mse': [], 'core_edge': [],
     'swap_structure': [], 'swap_appearance': [], 'swap_color_hist': [],
     'realism_recon': [], 'realism_swap': [],
     'core_color_leak': [], 'detail_edge_leak': [], 'traversal_goal': [],
+    'sep_core_goal': [], 'sep_mid_goal': [], 'sep_detail_goal': [], 'prior_kl_goal': [],
     'kl_core_goal': [], 'kl_detail_goal': [],
     'cov_goal': [], 'weak': [], 'consistency_goal': [],
     'core_active_goal': [], 'detail_active_goal': [],
@@ -339,6 +376,7 @@ for epoch in range(1, EPOCHS + 1):
                 if epoch == 3:
                     GOAL_SPECS['kl_core']['healthy'] = target_kl
                     GOAL_SPECS['kl_detail']['healthy'] = target_kl
+                    GOAL_SPECS['prior_kl']['healthy'] = target_kl * 2
                     print(f"🎯 KL healthy target activated: {target_kl:,.0f} nats (squeeze begins)")
                     print(f"   Discovered ceiling: {discovered_kl_ceiling:,.0f} nats")
                     print(f"   Adaptive squeeze: {discovered_kl_ceiling:,.0f} → {target_kl:,.0f} over epochs 3-{squeeze_end_epoch}")
@@ -348,6 +386,8 @@ for epoch in range(1, EPOCHS + 1):
                 GOAL_SPECS['kl_detail']['lower'] = kl_lower
                 GOAL_SPECS['kl_core']['upper'] = new_upper
                 GOAL_SPECS['kl_detail']['upper'] = new_upper
+                GOAL_SPECS['prior_kl']['lower'] = kl_lower * 2
+                GOAL_SPECS['prior_kl']['upper'] = new_upper * 2
 
                 # Re-initialize goal system normalizers with new bounds
                 goal_system.goal_specs = GOAL_SPECS
@@ -363,6 +403,7 @@ for epoch in range(1, EPOCHS + 1):
                 if epoch == 3:
                     GOAL_SPECS['kl_core']['healthy'] = 3000.0
                     GOAL_SPECS['kl_detail']['healthy'] = 3000.0
+                    GOAL_SPECS['prior_kl']['healthy'] = 6000.0
                     print(f"⚠️  Using fallback squeeze schedule (discovery failed)")
                     print(f"🎯 KL healthy target activated: 3000 nats (squeeze begins)")
 
@@ -370,6 +411,8 @@ for epoch in range(1, EPOCHS + 1):
                 GOAL_SPECS['kl_detail']['lower'] = kl_lower
                 GOAL_SPECS['kl_core']['upper'] = new_upper
                 GOAL_SPECS['kl_detail']['upper'] = new_upper
+                GOAL_SPECS['prior_kl']['lower'] = kl_lower * 2
+                GOAL_SPECS['prior_kl']['upper'] = new_upper * 2
                 goal_system.goal_specs = GOAL_SPECS
                 goal_system.rebuild_normalizers()
                 print(f"🔽 KL ceiling squeezed to {new_upper:,} nats (epoch {epoch})")
@@ -469,6 +512,43 @@ for epoch in range(1, EPOCHS + 1):
                 continue
             # No gradient clipping - external constraint
             optimizer_d.step()
+
+        if goal_system.calibrated and batch_idx % 2 == 0:
+            for disc in tc_discriminators.values():
+                disc.train()
+            optimizer_tc.zero_grad(set_to_none=True)
+
+            tc_losses = []
+            for name, disc in tc_discriminators.items():
+                start, end = tc_slices[name]
+                z_seg = z[:, start:end].detach()
+                z_perm = permute_dims(z_seg)
+                logits_real = disc(z_seg)
+                logits_perm = disc(z_perm)
+                loss_tc = 0.5 * (
+                    F.binary_cross_entropy_with_logits(logits_real, torch.ones_like(logits_real)) +
+                    F.binary_cross_entropy_with_logits(logits_perm, torch.zeros_like(logits_perm))
+                )
+                tc_losses.append(loss_tc)
+
+            tc_loss = torch.stack(tc_losses).mean()
+            tc_loss.backward()
+            bad_grad = any(
+                p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
+                for disc in tc_discriminators.values() for p in disc.parameters()
+            )
+            if bad_grad:
+                print("    [TC DISCRIMINATOR SKIP] NaN/Inf gradients detected")
+                optimizer_tc.zero_grad(set_to_none=True)
+                skip_count += 1
+                continue
+            optimizer_tc.step()
+
+        for disc in tc_discriminators.values():
+            set_requires_grad(disc, False)
+        tc_logits = compute_tc_logits(z, tc_discriminators, tc_slices)
+        for disc in tc_discriminators.values():
+            set_requires_grad(disc, True)
 
         if needs_recal and batch_idx < CALIBRATION_BATCHES:
             with torch.no_grad():
@@ -705,14 +785,15 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['edge'].append(result['edge_loss'])
 
             # Updated raw values including leak detection and logvar tracking
-            for k in ['kl_core_raw', 'kl_detail_raw', 'logvar_core_raw', 'logvar_detail_raw',
+            for k in ['kl_core_raw', 'kl_detail_raw', 'prior_kl_raw', 'logvar_core_raw', 'logvar_detail_raw',
                      'core_active_raw', 'detail_active_raw', 'core_effective_raw', 'detail_effective_raw',
                      'detail_ratio_raw', 'core_var_raw', 'detail_var_raw',
                      'core_var_max_raw', 'detail_var_max_raw', 'consistency_raw',
                      'detail_mean_raw', 'detail_var_mean_raw', 'detail_cov_raw',
                      'realism_recon_raw', 'realism_swap_raw',
                      'core_color_leak_raw', 'detail_edge_leak_raw',
-                     'traversal_raw', 'traversal_core_effect_raw', 'traversal_detail_effect_raw']:
+                     'traversal_raw', 'traversal_core_effect_raw', 'traversal_detail_effect_raw',
+                     'sep_core_raw', 'sep_mid_raw', 'sep_detail_raw']:
                 epoch_data[k].append(rv.get(k, 0))
             epoch_data['structure_loss'].append(rv['structure_loss'])
             epoch_data['appearance_loss'].append(rv['appearance_loss'])
@@ -734,6 +815,10 @@ for epoch in range(1, EPOCHS + 1):
             epoch_data['core_color_leak'].append(ig['core_color_leak'])
             epoch_data['detail_edge_leak'].append(ig['detail_edge_leak'])
             epoch_data['traversal_goal'].append(ig['traversal'])
+            epoch_data['sep_core_goal'].append(ig['sep_core'])
+            epoch_data['sep_mid_goal'].append(ig['sep_mid'])
+            epoch_data['sep_detail_goal'].append(ig['sep_detail'])
+            epoch_data['prior_kl_goal'].append(ig['prior_kl'])
             epoch_data['kl_core_goal'].append(ig['kl_core'])
             epoch_data['kl_detail_goal'].append(ig['kl_detail'])
             epoch_data['cov_goal'].append(ig['cov'])
@@ -757,6 +842,7 @@ for epoch in range(1, EPOCHS + 1):
 
     scheduler.step()
     scheduler_d.step()
+    scheduler_tc.step()
     last_good_state = copy.deepcopy(model.state_dict())
     last_good_state_d = copy.deepcopy(discriminator.state_dict())
     last_good_optimizer = copy.deepcopy(optimizer.state_dict())
@@ -916,6 +1002,7 @@ for epoch in range(1, EPOCHS + 1):
 torch.save({
     'model': model.state_dict(),
     'discriminator': discriminator.state_dict(),
+    'tc_discriminators': {name: disc.state_dict() for name, disc in tc_discriminators.items()},
     'histories': histories,
     'scales': goal_system.scales,
     'dim_var': dim_variance_history

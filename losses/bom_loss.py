@@ -339,19 +339,19 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, 
 
 def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, discriminator=None, x_aug=None):
     """
-    LBO-VAE Loss Function - Per-Sample Hard Gradient Routing
+    LBO-VAE Loss Function - Logarithmic Bottleneck Optimization
 
-    Key difference from β-VAE:
-    - Compute energies PER SAMPLE: [B] not scalars
-    - Select bottleneck PER SAMPLE: each sample routes through its worst objective
-    - Final loss: -log(min_groups_per_sample).mean()
+    Pure LBO formulation:
+    - Loss: -log(min(all_scores)) where min is taken over all samples and all groups
+    - Single global bottleneck: the worst score across entire batch determines gradient routing
+    - Discrete rollback if ANY score ≤ 0
 
     LBO Directives:
-    1. Pure min() barrier - NO softmin, NO epsilon on loss
+    1. Pure min() barrier - NO softmin, NO epsilon, NO clamping
     2. Pure geometric mean - NO epsilon on aggregation
     3. NO clamping on goals or groups
     4. Discrete rollback if any group ≤ 0
-    5. PER-SAMPLE bottleneck - NOT batch-mean
+    5. Global bottleneck: -log(min(groups))
     """
 
     # ========== INPUT VALIDATION ==========
@@ -670,14 +670,20 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, di
         print(f"    [NaN/Inf DETECTED] in groups tensor")
         return None
 
-    # ========== LBO LOSS (PER-SAMPLE BOTTLENECK) ==========
-    # Directive #5: Per-sample bottleneck - each sample routes through its own worst objective
-    # groups: [B, 7] → min_per_sample: [B], idx_per_sample: [B]
-    min_per_sample, idx_per_sample = groups.min(dim=1)  # [B], [B]
+    # ========== LBO LOSS (GLOBAL BOTTLENECK) ==========
+    # Pure LBO: -log(min(all_scores))
+    # Find the single worst score across ALL samples and ALL groups
+    global_min = groups.min()  # Scalar - worst score in entire batch
 
-    # Directive #4: Discrete rollback if ANY sample has S_min ≤ 0
-    if (min_per_sample <= 0).any():
-        # Find the most common failing group across samples
+    # Safety check for NaN/Inf in global_min before taking log
+    if torch.isnan(global_min) or torch.isinf(global_min):
+        print(f"    [LBO BARRIER] global_min is NaN/Inf")
+        return None
+
+    # Discrete rollback if global minimum ≤ 0
+    if global_min <= 0:
+        # Find which sample and group failed
+        min_per_sample, idx_per_sample = groups.min(dim=1)  # [B], [B]
         failed_mask = min_per_sample <= 0
         n_failed = failed_mask.sum().item()
         failed_indices = idx_per_sample[failed_mask]
@@ -731,20 +737,17 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, di
 
         return None
 
-    # Directive #1: Pure log barrier with numerical stability
-    # PER-SAMPLE loss, then average: -log(max(min_per_sample, eps)).mean()
-    # Clamp min_per_sample to prevent extreme gradients during backprop through log
-    # When score ~ 0.0002, d/dx[-log(x)] = -1/x ~ -5000, causing NaN propagation
-    min_per_sample_safe = torch.clamp(min_per_sample, min=1e-3)  # Prevent extreme log gradients
-    loss_per_sample = -torch.log(min_per_sample_safe)  # [B]
-    if torch.isnan(loss_per_sample).any():
-        print(f"    [LOSS NaN] Found NaN in -log(min_per_sample)")
+    # Directive #1: Pure logarithmic barrier
+    # LBO loss: -log(min(all_scores))
+    loss = -torch.log(global_min)  # Scalar
+
+    if torch.isnan(loss) or torch.isinf(loss):
+        print(f"    [LOSS NaN/Inf] Found NaN/Inf in -log(global_min={global_min:.6f})")
         return None
 
-    loss = loss_per_sample.mean()  # Scalar - final loss
-
     # ========== RETURN RESULTS (BATCH MEANS FOR LOGGING) ==========
-    # Most common bottleneck group across samples
+    # Most common bottleneck group across samples (for diagnostics)
+    min_per_sample, idx_per_sample = groups.min(dim=1)  # [B], [B]
     min_group_idx = idx_per_sample.mode().values.item()
 
     # Convert [B] tensors to batch-mean scalars for logging

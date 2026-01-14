@@ -126,10 +126,10 @@ GOAL_SPECS = {
     'traversal': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # Latent separation (TC discriminator outputs should be near 0 if disentangled)
-    # Widened from [-1.0, 1.0] to contain initialization range (sep_detail: [-1.65, 1.24])
-    'sep_core': {'type': ConstraintType.BOX, 'lower': -3.0, 'upper': 3.0},
-    'sep_mid': {'type': ConstraintType.BOX, 'lower': -3.0, 'upper': 3.0},
-    'sep_detail': {'type': ConstraintType.BOX, 'lower': -3.0, 'upper': 3.0},
+    # Use soft minimization on |logits| to avoid hard box bottlenecks when TC spikes.
+    'sep_core': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
+    'sep_mid': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
+    'sep_detail': {'type': ConstraintType.MINIMIZE_SOFT, 'scale': 'auto'},
 
     # Total prior KL (full latent), bounds aligned with KL squeeze schedule
     'prior_kl': {'type': ConstraintType.BOX_ASYMMETRIC, 'lower': 0.0, 'upper': 1e9, 'healthy': 2e8, 'lower_scale': 2.0},

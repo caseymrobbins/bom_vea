@@ -236,10 +236,6 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, 
     losses['logvar_core'] = logvar_core.mean().item()
     losses['logvar_detail'] = logvar_detail.mean().item()
 
-    logvar_safe = torch.clamp(logvar, min=-30.0, max=20.0)
-    kl_per_dim_prior = -0.5 * (1 + logvar_safe - mu.pow(2) - logvar_safe.exp())
-    losses['prior_kl'] = kl_per_dim_prior.sum(dim=1).mean().item()
-
     # Structure
     z_c = z_core - z_core.mean(0, keepdim=True)
     cov = (z_c.T @ z_c) / (B - 1 + 1e-2)

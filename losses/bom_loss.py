@@ -7,6 +7,9 @@ import torch.nn.functional as F
 from losses.goals import geometric_mean
 
 _sobel_x, _sobel_y = None, None
+# Hierarchical mapping: structure ("core") uses early stages, appearance ("detail") uses later stages.
+_LATENT_STRUCTURE_KEYS = ("core", "mid")
+_LATENT_APPEARANCE_KEYS = ("detail", "resid")
 
 def _get_sobel(device):
     global _sobel_x, _sobel_y
@@ -74,6 +77,18 @@ def compute_ssim(x, y, window_size=11, per_sample=False):
 def check_tensor(t):
     return not (torch.isnan(t).any() or torch.isinf(t).any())
 
+def check_latent_dict(latents):
+    return all(check_tensor(t) for t in latents.values())
+
+def concat_latents(latents, keys):
+    return torch.cat([latents[key] for key in keys], dim=1)
+
+def structure_latents(latents):
+    return concat_latents(latents, _LATENT_STRUCTURE_KEYS)
+
+def appearance_latents(latents):
+    return concat_latents(latents, _LATENT_APPEARANCE_KEYS)
+
 # ========== PER-SAMPLE METRIC HELPERS ==========
 # LBO-VAE: Compute energies per sample [B], not batch-mean scalars
 
@@ -100,12 +115,15 @@ def soft_active_count(var_per_dim, threshold=0.1, temperature=0.05):
     """
     return torch.sigmoid((var_per_dim - threshold) / temperature).sum()
 
-def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discriminator=None, x_aug=None, tc_logits=None):
+def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, x_aug=None):
     """Compute all raw losses for calibration. Used to collect statistics before setting scales."""
     B = x.shape[0]
-    z_core, z_detail = z[:, :split_idx], z[:, split_idx:]
-    mu_core, mu_detail = mu[:, :split_idx], mu[:, split_idx:]
-    logvar_core, logvar_detail = logvar[:, :split_idx], logvar[:, split_idx:]
+    z_core = structure_latents(z)
+    z_detail = appearance_latents(z)
+    mu_core = structure_latents(mu)
+    mu_detail = appearance_latents(mu)
+    logvar_core = structure_latents(logvar)
+    logvar_detail = appearance_latents(logvar)
 
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
     recon_core = model.decode(z_core_only)
@@ -183,7 +201,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     if x_aug is not None:
         with torch.no_grad():
             mu_aug, _ = model.encode(x_aug)
-            mu_aug_core = mu_aug[:, :split_idx]
+            mu_aug_core = structure_latents(mu_aug)
         losses['core_consistency'] = F.mse_loss(mu_core, mu_aug_core).item()
     else:
         losses['core_consistency'] = 0.01
@@ -193,10 +211,11 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     detail_var_per_dim = mu_detail.var(0)
     core_active_count = (core_var_per_dim > 0.1).float().sum()
     detail_active_count = (detail_var_per_dim > 0.1).float().sum()
-    total_dims = float(mu_core.shape[1])
+    total_dims_core = float(mu_core.shape[1])
+    total_dims_detail = float(mu_detail.shape[1])
 
-    core_inactive_ratio = (total_dims - core_active_count) / total_dims
-    detail_inactive_ratio = (total_dims - detail_active_count) / total_dims
+    core_inactive_ratio = (total_dims_core - core_active_count) / total_dims_core
+    detail_inactive_ratio = (total_dims_detail - detail_active_count) / total_dims_detail
     losses['core_active'] = core_inactive_ratio.item()
     losses['detail_active'] = detail_inactive_ratio.item()
 
@@ -207,8 +226,8 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     core_effective = torch.exp(-torch.sum(core_var_norm_safe * torch.log(core_var_norm_safe)))
     detail_effective = torch.exp(-torch.sum(detail_var_norm_safe * torch.log(detail_var_norm_safe)))
 
-    core_ineffective_ratio = (total_dims - core_effective) / total_dims
-    detail_ineffective_ratio = (total_dims - detail_effective) / total_dims
+    core_ineffective_ratio = (total_dims_core - core_effective) / total_dims_core
+    detail_ineffective_ratio = (total_dims_detail - detail_effective) / total_dims_detail
     losses['core_effective'] = core_ineffective_ratio.item()
     losses['detail_effective'] = detail_ineffective_ratio.item()
 
@@ -268,7 +287,7 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, split_idx, discrimin
     return losses
 
 
-def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, group_names, discriminator=None, x_aug=None, tc_logits=None):
+def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, group_names, discriminator=None, x_aug=None):
     """
     LBO-VAE Loss Function - Per-Sample Hard Gradient Routing
 
@@ -286,18 +305,24 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     """
 
     # ========== INPUT VALIDATION ==========
-    if not all([check_tensor(t) for t in [recon, x, mu, logvar, z]]):
+    if not all([check_tensor(t) for t in [recon, x]]) or not all([check_latent_dict(t) for t in [mu, logvar, z]]):
         bad_tensors = []
-        for name, t in [('recon', recon), ('x', x), ('mu', mu), ('logvar', logvar), ('z', z)]:
+        for name, t in [('recon', recon), ('x', x)]:
             if not check_tensor(t):
+                bad_tensors.append(name)
+        for name, t in [('mu', mu), ('logvar', logvar), ('z', z)]:
+            if not check_latent_dict(t):
                 bad_tensors.append(name)
         print(f"    [INPUT TENSOR FAILURE] Bad tensors: {', '.join(bad_tensors)}")
         return None
 
     B = x.shape[0]
-    z_core, z_detail = z[:, :split_idx], z[:, split_idx:]
-    mu_core, mu_detail = mu[:, :split_idx], mu[:, split_idx:]
-    logvar_core, logvar_detail = logvar[:, :split_idx], logvar[:, split_idx:]
+    z_core = structure_latents(z)
+    z_detail = appearance_latents(z)
+    mu_core = structure_latents(mu)
+    mu_detail = appearance_latents(mu)
+    logvar_core = structure_latents(logvar)
+    logvar_detail = appearance_latents(logvar)
 
     # ========== DECODE CORE-ONLY ==========
     z_core_only = torch.cat([z_core, torch.zeros_like(z_detail)], dim=1)
@@ -478,7 +503,7 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     if x_aug is not None:
         with torch.no_grad():
             mu_aug, _ = model.encode(x_aug)
-        mu_aug_core = mu_aug[:, :split_idx]
+        mu_aug_core = structure_latents(mu_aug)
         # Per-sample consistency: [B]
         consistency_loss = mse_per_sample_1d(mu_core, mu_aug_core)
         g_consistency = goals.goal(consistency_loss, 'core_consistency')  # [B]
@@ -496,10 +521,11 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     # DIFFERENTIABLE active count: use soft sigmoid instead of hard threshold
     core_active_count = soft_active_count(core_var_per_dim, threshold=0.1, temperature=0.05)
     detail_active_count = soft_active_count(detail_var_per_dim, threshold=0.1, temperature=0.05)
-    total_dims = float(mu_core.shape[1])
+    total_dims_core = float(mu_core.shape[1])
+    total_dims_detail = float(mu_detail.shape[1])
 
-    core_inactive_ratio = (total_dims - core_active_count) / total_dims
-    detail_inactive_ratio = (total_dims - detail_active_count) / total_dims
+    core_inactive_ratio = (total_dims_core - core_active_count) / total_dims_core
+    detail_inactive_ratio = (total_dims_detail - detail_active_count) / total_dims_detail
     g_core_active = goals.goal(core_inactive_ratio, 'core_active')  # scalar
     g_detail_active = goals.goal(detail_inactive_ratio, 'detail_active')  # scalar
 
@@ -517,8 +543,8 @@ def grouped_bom_loss(recon, x, mu, logvar, z, model, goals, vgg, split_idx, grou
     core_effective = torch.exp(-torch.sum(core_var_norm_safe * torch.log(core_var_norm_safe)))
     detail_effective = torch.exp(-torch.sum(detail_var_norm_safe * torch.log(detail_var_norm_safe)))
 
-    core_ineffective_ratio = (total_dims - core_effective) / total_dims
-    detail_ineffective_ratio = (total_dims - detail_effective) / total_dims
+    core_ineffective_ratio = (total_dims_core - core_effective) / total_dims_core
+    detail_ineffective_ratio = (total_dims_detail - detail_effective) / total_dims_detail
     g_core_effective = goals.goal(core_ineffective_ratio, 'core_effective')  # scalar
     g_detail_effective = goals.goal(detail_ineffective_ratio, 'detail_effective')  # scalar
 

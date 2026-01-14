@@ -605,7 +605,7 @@ for epoch in range(1, EPOCHS + 1):
         loss.backward()
 
         # Clip gradients to prevent NaN propagation from extreme -log(tiny_score) derivatives
-        # With per-sample LBO and KL scores ~0.0002, gradients can be ~5000x, need aggressive clipping
+        # With pure LBO (global min), gradient = -1/min(all_scores) can be very large when bottleneck score is small
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
 

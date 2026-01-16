@@ -44,15 +44,8 @@ NUM_TRAVERSE_DIMS = 15
 USE_AUGMENTATION = True
 DEBUG_RAW_NORMALIZED = True
 
-from enum import Enum
-
-class ConstraintType(Enum):
-    UPPER = "upper"
-    LOWER = "lower"
-    BOX = "box"
-    BOX_ASYMMETRIC = "box_asymmetric"
-    MINIMIZE_SOFT = "min_soft"
-    MINIMIZE_HARD = "min_hard"
+# Import ConstraintType from original config so goals.py can recognize it
+from configs.config import ConstraintType
 
 # ========================================
 # STREAMLINED GOALS (9 total, down from 35)
@@ -65,13 +58,10 @@ GOAL_SPECS = {
 
     # 1. KL divergence - Single merged KL budget
     # Combines: kl_core + kl_detail + prior_kl → unified KL target
-    # Adaptive squeeze: 15k → 3k over epochs 3-15
+    # Adaptive squeeze: 15k → 3k over epochs 3-15 (handled in training code)
     'kl_divergence': {
-        'type': ConstraintType.BOX_ASYMMETRIC,
-        'lower': 0.0,
-        'upper': 1e9,  # Set dynamically by squeeze schedule
-        'healthy': 2e8,
-        'lower_scale': 2.0
+        'type': ConstraintType.MINIMIZE_SOFT,
+        'scale': 'auto'  # Will be calibrated, then squeezed by training code
     },
 
     # 2. Disentanglement - TC discriminator penalty

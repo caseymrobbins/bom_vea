@@ -58,13 +58,10 @@ GOAL_SPECS = {
 
     # 1. KL divergence - Single merged KL budget
     # Combines: kl_core + kl_detail + prior_kl → unified KL target
-    # Adaptive squeeze: 15k → 3k over epochs 3-15 (handled in training code)
+    # No squeeze schedule - let KL optimize naturally with merged average
     'kl_divergence': {
-        'type': ConstraintType.BOX_ASYMMETRIC,
-        'lower': 0.0,
-        'upper': 1e9,  # Will be squeezed dynamically
-        'healthy': 1e8,  # Set to 3000 when squeeze starts
-        'lower_scale': 2.0
+        'type': ConstraintType.MINIMIZE_SOFT,
+        'scale': 'auto'  # Will calibrate during epoch 1
     },
 
     # 2. Disentanglement - TC discriminator penalty

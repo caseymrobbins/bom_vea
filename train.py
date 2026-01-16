@@ -3,6 +3,7 @@
 # Detail = APPEARANCE (colors, lighting)
 # Latent group has 4 sub-groups: KL, Structure, Capacity, Detail Stats
 # v17 changes: KL squeeze 15k→3k (epochs 2-15), appearance upper bound, relaxed capacity (0.4)
+# MUON EXPERIMENT: Using Muon optimizer for VAE 2D params (Conv/Linear weights), AdamW for 1D params
 import os, sys, time, copy
 import torch
 import torch.nn.functional as F
@@ -21,6 +22,7 @@ from models.vgg import VGGFeatures
 from losses.goals import GoalSystem
 from losses.bom_loss import compute_raw_losses, grouped_bom_loss, check_tensor
 from utils.viz import plot_group_balance, plot_reconstructions, plot_traversals, plot_cross_reconstruction, plot_training_history
+from muon import SingleDeviceMuonWithAuxAdam
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -54,11 +56,29 @@ if USE_TORCH_COMPILE and hasattr(torch, 'compile'):
     tc_discriminators = {name: torch.compile(disc, mode='reduce-overhead') for name, disc in tc_discriminators.items()}
     print("Models compiled!")
 
-optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+# Muon optimizer for VAE: Use Muon for 2D+ params (Conv2d, Linear weights), AdamW for 1D params (biases, BN)
+vae_2d_params = [p for p in model.parameters() if p.ndim >= 2]
+vae_1d_params = [p for p in model.parameters() if p.ndim < 2]
+
+print(f"VAE optimizer setup: {len(vae_2d_params)} params use Muon, {len(vae_1d_params)} params use AdamW")
+
+# Muon hyperparameters tuned for VAE:
+# - Muon LR: 0.01 (10x higher than old AdamW, but conservative for VAE)
+# - AdamW LR: 1e-3 (same as old LEARNING_RATE)
+# - Momentum: 0.95 (Muon default)
+# - Betas: (0.9, 0.95) (standard for Muon hybrid)
+param_groups_vae = [
+    dict(params=vae_2d_params, use_muon=True, lr=0.01, momentum=0.95, weight_decay=WEIGHT_DECAY),
+    dict(params=vae_1d_params, use_muon=False, lr=LEARNING_RATE, betas=(0.9, 0.95), weight_decay=WEIGHT_DECAY),
+]
+optimizer = SingleDeviceMuonWithAuxAdam(param_groups_vae)
+
+# Keep discriminators on pure AdamW for now
 optimizer_d = optim.AdamW(discriminator.parameters(), lr=LEARNING_RATE_D, weight_decay=WEIGHT_DECAY)
 tc_params = [p for disc in tc_discriminators.values() for p in disc.parameters()]
 optimizer_tc = optim.AdamW(tc_params, lr=LEARNING_RATE_D, weight_decay=WEIGHT_DECAY)
 
+# Note: LR schedulers work with any optimizer, including Muon
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-5)
 scheduler_d = optim.lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=EPOCHS, eta_min=1e-5)
 scheduler_tc = optim.lr_scheduler.CosineAnnealingLR(optimizer_tc, T_max=EPOCHS, eta_min=1e-5)

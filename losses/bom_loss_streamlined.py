@@ -255,6 +255,9 @@ def grouped_bom_loss_streamlined(recon, x, mu, logvar, z, model, goals, vgg, gro
     else:
         g_cross_recon = torch.full((B,), 0.5, device=x.device)
         cross_recon_loss = torch.zeros(B, device=x.device)
+        swap_struct_loss = torch.zeros(B, device=x.device)
+        swap_appear_loss = torch.zeros(B, device=x.device)
+        swap_hist_loss = torch.zeros(B, device=x.device)
         r_sw = recon
 
     # ========== GOAL 3: REALISM (per-sample [B]) ==========
@@ -419,6 +422,7 @@ def grouped_bom_loss_streamlined(recon, x, mu, logvar, z, model, goals, vgg, gro
     min_goal_idx = idx_per_sample.mode().values.item()
 
     individual_goals = {
+        # Streamlined 9 goals
         'kl_divergence': g_kl_divergence.mean().item(),
         'disentanglement': g_disentanglement.mean().item(),
         'capacity': g_capacity.mean().item(),
@@ -428,6 +432,14 @@ def grouped_bom_loss_streamlined(recon, x, mu, logvar, z, model, goals, vgg, gro
         'cross_recon': g_cross_recon.mean().item(),
         'realism': g_realism.mean().item(),
         'consistency': g_consistency.mean().item(),
+        # Backwards compatibility - stub values for old individual goals
+        'pixel': 0.5, 'edge': 0.5, 'perceptual': 0.5,
+        'core_mse': 0.5, 'core_edge': 0.5,
+        'swap_structure': 0.5, 'swap_appearance': 0.5, 'swap_color_hist': 0.5,
+        'realism_recon': 0.5, 'realism_swap': 0.5,
+        'core_color_leak': 0.5, 'detail_edge_leak': 0.5,
+        'traversal': 0.5,
+        'sep_core': 0.5, 'sep_mid': 0.5, 'sep_detail': 0.5,
     }
 
     # Goal values (same as individual_goals, kept for backwards compatibility)
@@ -446,6 +458,10 @@ def grouped_bom_loss_streamlined(recon, x, mu, logvar, z, model, goals, vgg, gro
         'cross_recon_raw': cross_recon_loss.mean().item(),
         'realism_raw': realism_loss.mean().item(),
         'consistency_raw': consistency_loss.mean().item(),
+        # Swap components (for backwards compatibility with train.py)
+        'structure_loss': swap_struct_loss.mean().item(),
+        'appearance_loss': swap_appear_loss.mean().item(),
+        'color_hist_loss': swap_hist_loss.mean().item(),
     }
 
     return {

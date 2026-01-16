@@ -29,24 +29,25 @@ latent (16):
 health (3): detail_ratio, core_var_health, detail_var_health
 ```
 
-### Streamlined Structure (9 goals, 3 groups)
+### Streamlined Structure (9 goals - FLAT, no grouping)
+
+**Pure LBO**: `loss = -log(min(all 9 goals))`
+
+With only 9 goals, we don't need grouping. All goals are equal:
 
 ```
-LATENT_QUALITY (5 goals - TOP PRIORITY):
-  1. kl_divergence: Merged kl_core + kl_detail + prior_kl
-  2. disentanglement: Merged sep_core + sep_mid + sep_detail
-  3. capacity: Merged core_active + detail_active + core_effective + detail_effective
-  4. behavioral_separation: Merged core_color_leak + detail_edge_leak
-  5. latent_stats: Merged logvar_core + logvar_detail + cov + weak
-
-RECONSTRUCTION (2 goals):
-  6. reconstruction: Merged pixel + edge + perceptual (0.2*pixel + 0.3*edge + 0.5*perceptual)
-  7. cross_recon: Merged swap_structure + swap_appearance + swap_color_hist
-
-STABILITY (2 goals):
-  8. realism: Merged realism_recon + realism_swap
-  9. consistency: core_consistency (augmentation invariance)
+1. kl_divergence: Merged kl_core + kl_detail + prior_kl
+2. disentanglement: Merged sep_core + sep_mid + sep_detail
+3. capacity: Merged core_active + detail_active + core_effective + detail_effective
+4. behavioral_separation: Merged core_color_leak + detail_edge_leak
+5. latent_stats: Merged logvar_core + logvar_detail + cov + weak
+6. reconstruction: Merged pixel + edge + perceptual (0.2*pixel + 0.3*edge + 0.5*perceptual)
+7. cross_recon: Merged swap_structure + swap_appearance + swap_color_hist
+8. realism: Merged realism_recon + realism_swap
+9. consistency: core_consistency (augmentation invariance)
 ```
+
+**No grouping** - Each goal competes equally for attention via the global min() barrier.
 
 ---
 
@@ -80,19 +81,14 @@ STABILITY (2 goals):
 - Merges logvar, covariance, weak dimension penalties
 - Prevents variance explosion and dimension collapse
 
-### 2. **Group Structure**
+### 2. **Flat Structure - No Grouping**
 
-**Old**: 8 groups fighting for gradient bandwidth
-**New**: 3 groups with clear priorities:
+**Old**: 35 goals in 8 groups with hierarchical geometric means
+**New**: 9 flat goals with pure min() across all
 
-1. **latent_quality** (5 goals) - **HIGHEST PRIORITY**
-   - Ensures latents are useful, disentangled, and fully utilized
-
-2. **reconstruction** (2 goals) - **MEDIUM PRIORITY**
-   - Image quality and cross-reconstruction consistency
-
-3. **stability** (2 goals) - **SUPPORTING PRIORITY**
-   - Realism (GAN) and consistency (augmentation)
+- **No artificial hierarchy** - LBO treats all 9 goals equally
+- **Pure barrier optimization** - The single worst goal determines loss
+- **Simpler math** - No geometric mean grouping, just `loss = -log(min(all 9))`
 
 ### 3. **Removed Goals**
 
@@ -140,8 +136,8 @@ python train_streamlined.py
 
 ### 1. **Clearer Gradient Flow**
 - 9 goals instead of 35 means each gets ~11% of gradient budget (vs 2.8%)
-- Reconstruction gets 22% budget (2 goals in reconstruction group)
-- Latent quality gets 56% budget (5 goals in latent_quality group)
+- No grouping means **pure competition** - the worst goal gets fixed first
+- LBO naturally balances all 9 goals without artificial hierarchies
 
 ### 2. **Better Reconstructions**
 - Less gradient competition → less blur
@@ -182,10 +178,18 @@ All goals use `MINIMIZE_SOFT` with auto-calibrated scales except:
 
 ### Key Metrics to Watch
 
-**Group Scores** (should all increase):
-- `latent_quality`: Target >0.55
-- `reconstruction`: Target >0.50
-- `stability`: Target >0.50
+**Goal Scores** (all 9 should trend toward 0.5-0.7):
+- `kl_divergence`: Target >0.5
+- `disentanglement`: Target >0.5
+- `capacity`: Target >0.5
+- `behavioral_separation`: Target >0.5
+- `latent_stats`: Target >0.5
+- `reconstruction`: Target >0.5
+- `cross_recon`: Target >0.5
+- `realism`: Target >0.5
+- `consistency`: Target >0.5
+
+**Bottleneck Goal**: Watch `min_idx` to see which goal is the current bottleneck
 
 **Raw Metrics**:
 - `kl_total_raw`: 15k → 3k over epochs
@@ -204,12 +208,13 @@ All goals use `MINIMIZE_SOFT` with auto-calibrated scales except:
 | Metric | Original (35 goals) | Streamlined (9 goals) |
 |--------|--------------------|-----------------------|
 | **Goals** | 35 | 9 |
-| **Groups** | 8 | 3 |
-| **Reconstruction budget** | ~3% | ~22% |
-| **Latent quality budget** | ~45% | ~56% |
+| **Groups** | 8 (hierarchical) | 0 (flat) |
+| **Structure** | Geometric mean groups | Pure min() across all |
+| **Goal budget** | ~2.8% each | ~11% each |
 | **Expected SSIM** | 0.4-0.5 | 0.6-0.7 |
-| **Gradient complexity** | Very high | Moderate |
+| **Gradient complexity** | Very high | Low |
 | **Debug difficulty** | Hard | Easy |
+| **LBO purity** | Diluted by grouping | Pure barrier optimization |
 
 ---
 

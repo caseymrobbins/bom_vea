@@ -180,12 +180,20 @@ def compute_raw_losses(recon, x, mu, logvar, z, model, vgg, discriminator=None, 
 
 def grouped_bom_loss_streamlined(recon, x, mu, logvar, z, model, goals, vgg, group_names, discriminator=None, x_aug=None, tc_logits=None):
     """
-    Streamlined LBO-VAE Loss - 9 goals instead of 35.
+    Streamlined LBO-VAE Loss - 9 flat goals instead of 35.
 
-    Groups (3 total):
-    1. latent_quality: kl_divergence, disentanglement, capacity, behavioral_separation, latent_stats
-    2. reconstruction: reconstruction, cross_recon
-    3. stability: realism, consistency
+    Pure LBO: loss = -log(min(all 9 goals))
+
+    Goals (9 total - no grouping):
+    1. kl_divergence
+    2. disentanglement
+    3. capacity
+    4. behavioral_separation
+    5. latent_stats
+    6. reconstruction
+    7. cross_recon
+    8. realism
+    9. consistency
     """
 
     # ========== INPUT VALIDATION ==========
@@ -360,44 +368,45 @@ def grouped_bom_loss_streamlined(recon, x, mu, logvar, z, model, goals, vgg, gro
         g_consistency = torch.full((B,), 0.5, device=x.device)
         consistency_loss = torch.zeros(B, device=x.device)
 
-    # ========== AGGREGATE INTO 3 GROUPS ==========
-    # Group 1: Latent Quality (5 goals)
-    group_latent_quality = geometric_mean([
-        g_kl_divergence, g_disentanglement, g_capacity, g_behavioral_separation, g_latent_stats
-    ])  # [B]
-
-    # Group 2: Reconstruction (2 goals)
-    group_reconstruction = geometric_mean([g_reconstruction, g_cross_recon])  # [B]
-
-    # Group 3: Stability (2 goals)
-    group_stability = geometric_mean([g_realism, g_consistency])  # [B]
-
-    # Stack as [B, 3]
-    groups = torch.stack([group_latent_quality, group_reconstruction, group_stability], dim=1)  # [B, 3]
+    # ========== FLAT STRUCTURE: STACK ALL 9 GOALS ==========
+    # No grouping - pure LBO with 9 constraints
+    # Stack as [B, 9]
+    goals_tensor = torch.stack([
+        g_kl_divergence,           # 0
+        g_disentanglement,         # 1
+        g_capacity,                # 2
+        g_behavioral_separation,   # 3
+        g_latent_stats,            # 4
+        g_reconstruction,          # 5
+        g_cross_recon,             # 6
+        g_realism,                 # 7
+        g_consistency,             # 8
+    ], dim=1)  # [B, 9]
 
     # ========== CHECK FOR NaN/Inf ==========
-    if torch.isnan(groups).any() or torch.isinf(groups).any():
-        print(f"    [NaN/Inf DETECTED] in groups tensor")
+    if torch.isnan(goals_tensor).any() or torch.isinf(goals_tensor).any():
+        print(f"    [NaN/Inf DETECTED] in goals tensor")
         return None
 
     # ========== LBO LOSS (GLOBAL BOTTLENECK) ==========
-    global_min = groups.min()
+    # Pure LBO: -log(min(all 9 goals across all samples))
+    global_min = goals_tensor.min()
     if torch.isnan(global_min) or torch.isinf(global_min):
         print(f"    [LBO BARRIER] global_min is NaN/Inf")
         return None
 
     if global_min <= 0:
-        min_per_sample, idx_per_sample = groups.min(dim=1)
+        min_per_sample, idx_per_sample = goals_tensor.min(dim=1)
         failed_mask = min_per_sample <= 0
         n_failed = failed_mask.sum().item()
         failed_indices = idx_per_sample[failed_mask]
         if len(failed_indices) > 0:
             most_common_failure = failed_indices.mode().values.item()
-            group_name = group_names[most_common_failure] if most_common_failure < len(group_names) else f"group_{most_common_failure}"
+            goal_name = group_names[most_common_failure] if most_common_failure < len(group_names) else f"goal_{most_common_failure}"
         else:
-            group_name = "unknown"
+            goal_name = "unknown"
 
-        print(f"    [LBO BARRIER] {n_failed}/{B} samples failed, most common: '{group_name}'")
+        print(f"    [LBO BARRIER] {n_failed}/{B} samples failed, most common: '{goal_name}'")
         return None
 
     loss = -torch.log(global_min)
@@ -406,22 +415,23 @@ def grouped_bom_loss_streamlined(recon, x, mu, logvar, z, model, goals, vgg, gro
         return None
 
     # ========== RETURN RESULTS ==========
-    min_per_sample, idx_per_sample = groups.min(dim=1)
-    min_group_idx = idx_per_sample.mode().values.item()
+    min_per_sample, idx_per_sample = goals_tensor.min(dim=1)
+    min_goal_idx = idx_per_sample.mode().values.item()
 
     individual_goals = {
+        'kl_divergence': g_kl_divergence.mean().item(),
+        'disentanglement': g_disentanglement.mean().item(),
+        'capacity': g_capacity.mean().item(),
+        'behavioral_separation': g_behavioral_separation.mean().item(),
+        'latent_stats': g_latent_stats.mean().item(),
         'reconstruction': g_reconstruction.mean().item(),
         'cross_recon': g_cross_recon.mean().item(),
         'realism': g_realism.mean().item(),
-        'kl_divergence': g_kl_divergence.mean().item(),
-        'disentanglement': g_disentanglement.mean().item(),
-        'behavioral_separation': g_behavioral_separation.mean().item(),
-        'capacity': g_capacity.mean().item(),
-        'latent_stats': g_latent_stats.mean().item(),
         'consistency': g_consistency.mean().item(),
     }
 
-    group_values = {n: groups[:, i].mean().item() for i, n in enumerate(group_names)}
+    # Goal values (same as individual_goals, kept for backwards compatibility)
+    group_values = {n: goals_tensor[:, i].mean().item() for i, n in enumerate(group_names)}
 
     raw_values = {
         'kl_core_raw': kl_core_val.mean().item(),
@@ -440,9 +450,9 @@ def grouped_bom_loss_streamlined(recon, x, mu, logvar, z, model, goals, vgg, gro
 
     return {
         'loss': loss,
-        'groups': groups,
-        'min_idx': min_group_idx,
-        'group_values': group_values,
+        'groups': goals_tensor,  # [B, 9] - all 9 goal scores per sample
+        'min_idx': min_goal_idx,  # Index of most common bottleneck goal
+        'group_values': group_values,  # Backwards compatible naming
         'individual_goals': individual_goals,
         'raw_values': raw_values,
         'ssim': ssim_per_sample.mean().item(),

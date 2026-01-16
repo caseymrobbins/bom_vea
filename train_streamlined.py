@@ -1,7 +1,7 @@
-# train_streamlined.py - STREAMLINED VERSION: 9 goals instead of 35
+# train_streamlined.py - STREAMLINED VERSION: 9 FLAT goals instead of 35
 # Priority: Useful latents > Perfect reconstruction
-# Goals reduced from 35 → 9 for cleaner gradient flow
-# Groups reduced from 8 → 3
+# Goals: 35 → 9 for cleaner gradient flow
+# Structure: FLAT (no grouping) - pure LBO with min() across all 9
 # MUON EXPERIMENT: Using Muon optimizer for VAE 2D params (Conv/Linear weights), AdamW for 1D params
 import os, sys, time, copy
 import torch

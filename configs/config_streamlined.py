@@ -142,33 +142,25 @@ GOAL_SPECS = {
 }
 
 # ========================================
-# GROUP STRUCTURE (5 groups, down from 8)
+# FLAT STRUCTURE - NO GROUPING
 # ========================================
-# Simplified group names for clearer loss tracking
+# With only 9 goals, we can use them flat without grouping
+# Pure LBO: loss = -log(min(all 9 goals))
 
-GROUP_NAMES = [
-    'latent_quality',  # kl_divergence, disentanglement, capacity, behavioral_separation, latent_stats
-    'reconstruction',   # reconstruction, cross_recon
-    'stability',        # realism, consistency
+GOAL_NAMES = [
+    'kl_divergence',
+    'disentanglement',
+    'capacity',
+    'behavioral_separation',
+    'latent_stats',
+    'reconstruction',
+    'cross_recon',
+    'realism',
+    'consistency',
 ]
 
-# Mapping of goals to groups (for clarity)
-GOAL_TO_GROUP = {
-    # Latent quality (5 goals)
-    'kl_divergence': 'latent_quality',
-    'disentanglement': 'latent_quality',
-    'capacity': 'latent_quality',
-    'behavioral_separation': 'latent_quality',
-    'latent_stats': 'latent_quality',
-
-    # Reconstruction (2 goals)
-    'reconstruction': 'reconstruction',
-    'cross_recon': 'reconstruction',
-
-    # Stability (2 goals)
-    'realism': 'stability',
-    'consistency': 'stability',
-}
+# For backwards compatibility with training code
+GROUP_NAMES = GOAL_NAMES  # Flat structure: each "group" is one goal
 
 # ========================================
 # ADAPTIVE SQUEEZE & TIGHTENING

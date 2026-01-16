@@ -853,75 +853,15 @@ for epoch in range(1, EPOCHS + 1):
     # Adaptive tightening with progressive backoff
     rollback_rate = skip_count / total_batches if total_batches > 0 else 0
 
-    # Check if last tightening was too aggressive (>15% rollbacks) - RESTORE previous constraints
-    if epoch >= ADAPTIVE_TIGHTENING_START + 1 and rollback_rate > ROLLBACK_THRESHOLD_MAX and previous_goal_specs is not None:
-        print(f"\n⚠️  Rollback rate too high ({rollback_rate*100:.0f}%), RESTORING previous constraints")
-        # Restore the constraints from before tightening
-        for name in GOAL_SPECS:
-            GOAL_SPECS[name] = copy.deepcopy(previous_goal_specs[name])
-        goal_system.specs = GOAL_SPECS
-        goal_system.rebuild_normalizers()
-        previous_goal_specs = None  # Clear backup
-
-    # Decide if we should tighten this epoch
-    # LBO Directive #6: Only tighten when "VAE stabilizes (S_min > 0.5)"
-    # v17: Constant 5% squeeze every epoch (simplified from progressive rates)
-    current_rate = ADAPTIVE_TIGHTENING_RATE
-
-    # Check stability: average min_group over last STABILITY_WINDOW epochs
-    from configs.config import MIN_GROUP_STABILITY_THRESHOLD, STABILITY_WINDOW
-    recent_min_groups = histories['min_group'][-STABILITY_WINDOW:] if len(histories['min_group']) >= STABILITY_WINDOW else histories['min_group']
-    avg_min_group = sum(recent_min_groups) / len(recent_min_groups) if recent_min_groups else 0.0
-    is_stable = avg_min_group >= MIN_GROUP_STABILITY_THRESHOLD
-
-    should_tighten = epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate < ROLLBACK_THRESHOLD_TARGET and is_stable
-
-    # Track when we first hit the target threshold
-    if epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate >= ROLLBACK_THRESHOLD_TARGET and threshold_hit_epoch is None:
-        threshold_hit_epoch = epoch
+    # CONSTRAINT RESTORATION DISABLED FOR STREAMLINED CONFIG
+    # Pure LBO: no dynamic constraint modifications
 
     print(f"\nEpoch {epoch:2d} | Loss: {histories['loss'][-1]:.3f} | Min: {histories['min_group'][-1]:.3f} | SSIM: {histories['ssim'][-1]:.3f}")
     print(f"         Structure: {struct:.4f} | Appearance: {appear:.4f}")
     print(f"         KL_core: {kl_c:.1f} | KL_detail: {kl_d:.1f}")
     print(f"         Groups: " + " | ".join(f"{n}:{histories[f'group_{n}'][-1]:.2f}" for n in GROUP_NAMES))
     print(f"         Bottlenecks: " + " | ".join(f"{n}:{bn_pcts[n]:.1f}%" for n in GROUP_NAMES))
-    print(f"         Rollbacks: {skip_count}/{total_batches} ({rollback_rate*100:.1f}%)", end="")
-
-    if should_tighten:
-        tightening_pct = int((1 - current_rate) * 100)
-        print(f" → 🔧 TIGHTENING {tightening_pct}% (rollback={rollback_rate*100:.1f}% < {ROLLBACK_THRESHOLD_TARGET*100:.0f}%, stable={avg_min_group:.3f} > {MIN_GROUP_STABILITY_THRESHOLD})")
-
-        # Save current constraints before tightening (for potential rollback)
-        previous_goal_specs = {name: copy.deepcopy(spec) for name, spec in GOAL_SPECS.items()}
-
-        # Tighten constraints progressively
-        # MINIMIZE_SOFT: Full tightening (harder to satisfy)
-        for name, spec in GOAL_SPECS.items():
-            if spec['type'] == ConstraintType.MINIMIZE_SOFT and isinstance(spec.get('scale'), (int, float)):
-                spec['scale'] *= current_rate
-
-        # BOX: Gentler tightening (50% of MINIMIZE_SOFT rate) to avoid boundary violations
-        box_rate = 1.0 - (1.0 - current_rate) * 0.5  # Half the tightening
-        for name, spec in GOAL_SPECS.items():
-            if spec['type'] in [ConstraintType.BOX, ConstraintType.BOX_ASYMMETRIC]:
-                if 'lower' in spec and 'upper' in spec:
-                    center = (spec['lower'] + spec['upper']) / 2
-                    range_half = (spec['upper'] - spec['lower']) / 2
-                    new_range_half = range_half * box_rate
-                    spec['lower'] = center - new_range_half
-                    spec['upper'] = center + new_range_half
-
-        # Update goal_system with tightened specs (rebuild normalizers, keep scales)
-        goal_system.specs = GOAL_SPECS
-        goal_system.rebuild_normalizers()
-    else:
-        if epoch >= ADAPTIVE_TIGHTENING_START:
-            if not is_stable:
-                print(f" → ⏸️  Skipping tightening (unstable: avg_min={avg_min_group:.3f} < {MIN_GROUP_STABILITY_THRESHOLD})")
-            else:
-                print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")
-        else:
-            print()
+    print(f"         Rollbacks: {skip_count}/{total_batches} ({rollback_rate*100:.1f}%)")
 
     # Generate visualizations at the end of each epoch
     print(f"\n📸 Generating epoch {epoch} visualizations...")

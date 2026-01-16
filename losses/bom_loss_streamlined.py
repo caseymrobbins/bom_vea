@@ -447,6 +447,7 @@ def grouped_bom_loss_streamlined(recon, x, mu, logvar, z, model, goals, vgg, gro
         'core_effective': 0.5, 'detail_effective': 0.5,
         'detail_mean': 0.5, 'detail_var_mean': 0.5, 'detail_cov': 0.5,
         'detail_ratio': 0.5,
+        'core_var': 0.5, 'detail_var': 0.5,  # Variance health goals
     }
 
     # Goal values (same as individual_goals, kept for backwards compatibility)

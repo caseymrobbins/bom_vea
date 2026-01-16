@@ -76,7 +76,7 @@ GOAL_SPECS = {
     # Ensures latent dimensions are actually used (not collapsed)
     'capacity': {
         'type': ConstraintType.MINIMIZE_SOFT,
-        'scale': 0.4  # Allows 60% active dims (relaxed from 70%)
+        'scale': 0.1  # Tighter than 0.4 to compete with kl/disentanglement
     },
 
     # 4. Behavioral separation - Structure vs Appearance
@@ -120,14 +120,14 @@ GOAL_SPECS = {
     # Keeps reconstructions realistic (not blurry)
     'realism': {
         'type': ConstraintType.MINIMIZE_SOFT,
-        'scale': 2.0  # Fixed: discriminator untrained during calibration
+        'scale': 0.5  # Tightened from 2.0 to compete with kl/disentanglement
     },
 
     # 9. Consistency - Augmentation invariance
     # Core structure should be robust to augmentations
     'consistency': {
         'type': ConstraintType.MINIMIZE_SOFT,
-        'scale': 500.0  # Large fixed scale for augmentation variance
+        'scale': 50.0  # Tightened from 500.0 to actually matter
     },
 }
 

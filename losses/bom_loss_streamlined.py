@@ -440,6 +440,13 @@ def grouped_bom_loss_streamlined(recon, x, mu, logvar, z, model, goals, vgg, gro
         'core_color_leak': 0.5, 'detail_edge_leak': 0.5,
         'traversal': 0.5,
         'sep_core': 0.5, 'sep_mid': 0.5, 'sep_detail': 0.5,
+        'prior_kl': 0.5, 'kl_core': 0.5, 'kl_detail': 0.5,
+        'cov': 0.5, 'weak': 0.5,
+        'core_consistency': 0.5,
+        'core_active': 0.5, 'detail_active': 0.5,
+        'core_effective': 0.5, 'detail_effective': 0.5,
+        'detail_mean': 0.5, 'detail_var_mean': 0.5, 'detail_cov': 0.5,
+        'detail_ratio': 0.5,
     }
 
     # Goal values (same as individual_goals, kept for backwards compatibility)

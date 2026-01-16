@@ -372,57 +372,51 @@ for epoch in range(1, EPOCHS + 1):
             kl_lower = 0.0
 
         if discovered_kl_ceiling is not None:
-            # ADAPTIVE SQUEEZE: Use discovered ceiling from epoch 1
-            # Calculate squeeze from discovered ceiling → 3000 over epochs 3-15
-            # Use geometric progression: constant percentage reduction per epoch
-            target_kl = 3000.0
-            squeeze_start_epoch = 3
-            squeeze_end_epoch = 15
+            # ADAPTIVE CEILING: Use discovered ceiling from epoch 2
+            # For merged kl_divergence, we discovered a low ceiling (~300 nats)
+            # Just maintain this ceiling without squeeze schedule
+            # The merged KL starts low (averaged across 3 components)
 
-            if epoch <= squeeze_end_epoch:
-                # Geometric interpolation from discovered_ceiling to target_kl
-                # At epoch 3: start from discovered ceiling
-                # At epoch 15: reach 3000
-                num_steps = squeeze_end_epoch - squeeze_start_epoch
-                step = epoch - squeeze_start_epoch
+            if epoch >= 3:
+                # Set upper bound based on discovered ceiling
+                # Healthy target should be BELOW upper bound (not above!)
+                ceiling_with_headroom = discovered_kl_ceiling * 1.1
+                healthy_target = discovered_kl_ceiling * 0.8  # 80% of ceiling
 
-                # Geometric progression: ceiling * (target/ceiling)^(step/num_steps)
-                ratio = (target_kl / discovered_kl_ceiling) ** (step / num_steps)
-                new_upper = discovered_kl_ceiling * ratio
-
-                # FIRST APPLICATION (epoch 3): Set healthy target to 3000 nats
-                # This activates the squeeze - epochs 1-2 had healthy=1e8 (no target)
-                if epoch == 3:
-                    GOAL_SPECS['kl_divergence']['healthy'] = target_kl
-                    print(f"🎯 KL healthy target activated: {target_kl:,.0f} nats (squeeze begins)")
-                    print(f"   Discovered ceiling: {discovered_kl_ceiling:,.0f} nats")
-                    print(f"   Adaptive squeeze: {discovered_kl_ceiling:,.0f} → {target_kl:,.0f} over epochs 3-{squeeze_end_epoch}")
-
-                # Update upper bounds (squeeze the ceiling)
                 GOAL_SPECS['kl_divergence']['lower'] = kl_lower
-                GOAL_SPECS['kl_divergence']['upper'] = new_upper
+                GOAL_SPECS['kl_divergence']['upper'] = ceiling_with_headroom
+                GOAL_SPECS['kl_divergence']['healthy'] = healthy_target
 
                 # Re-initialize goal system normalizers with new bounds
                 goal_system.goal_specs = GOAL_SPECS
                 goal_system.rebuild_normalizers()
 
-                reduction_pct = 100 * (1 - new_upper / GOAL_SPECS['kl_divergence'].get('upper', new_upper))
-                print(f"🔽 KL ceiling squeezed to {new_upper:,.0f} nats (epoch {epoch}, {reduction_pct:.1f}% reduction)")
+                if epoch == 3:
+                    print(f"🎯 KL bounds activated:")
+                    print(f"   Discovered ceiling: {discovered_kl_ceiling:,.0f} nats")
+                    print(f"   Upper bound: {ceiling_with_headroom:,.0f} nats (+10% headroom)")
+                    print(f"   Healthy target: {healthy_target:,.0f} nats (80% of ceiling)")
+                    print(f"   Lower bound: {kl_lower:,.0f} nats")
 
         elif epoch in KL_SQUEEZE_SCHEDULE:
             # FALLBACK: Use hardcoded schedule if discovery failed
+            # Note: Fallback schedule may not work well with merged kl_divergence
             new_upper = KL_SQUEEZE_SCHEDULE[epoch]
             if new_upper is not None:
+                healthy_target = new_upper * 0.8  # Healthy should be below upper
+
                 if epoch == 3:
-                    GOAL_SPECS['kl_divergence']['healthy'] = 3000.0
                     print(f"⚠️  Using fallback squeeze schedule (discovery failed)")
-                    print(f"🎯 KL healthy target activated: 3000 nats (squeeze begins)")
+                    print(f"🎯 KL bounds from fallback:")
+                    print(f"   Upper bound: {new_upper:,} nats")
+                    print(f"   Healthy target: {healthy_target:,.0f} nats")
 
                 GOAL_SPECS['kl_divergence']['lower'] = kl_lower
                 GOAL_SPECS['kl_divergence']['upper'] = new_upper
+                GOAL_SPECS['kl_divergence']['healthy'] = healthy_target
                 goal_system.goal_specs = GOAL_SPECS
                 goal_system.rebuild_normalizers()
-                print(f"🔽 KL ceiling squeezed to {new_upper:,} nats (epoch {epoch})")
+                print(f"🔽 KL ceiling updated to {new_upper:,} nats (epoch {epoch})")
 
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")

@@ -357,9 +357,8 @@ for epoch in range(1, EPOCHS + 1):
         needs_recal = True
         print(f"\n📊 Epoch 1: Initial calibration of all goal scales...")
 
-    # Remove epoch 1 safety margin at start of epoch 2
-    if epoch == 2 and goal_system.epoch1_margin_applied:
-        goal_system.remove_epoch1_margin()
+    # SAFETY MARGIN REMOVAL DISABLED FOR STREAMLINED CONFIG
+    # Pure LBO: scales calibrated in epoch 1 stay FIXED (no margin removal)
 
     # v17d: Adaptive KL squeeze (starts epoch 3, based on discovered ceiling)
     if epoch >= 3:

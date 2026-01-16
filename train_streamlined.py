@@ -371,52 +371,10 @@ for epoch in range(1, EPOCHS + 1):
         else:
             kl_lower = 0.0
 
-        if discovered_kl_ceiling is not None:
-            # ADAPTIVE CEILING: Use discovered ceiling from epoch 2
-            # For merged kl_divergence, we discovered a low ceiling (~300 nats)
-            # Just maintain this ceiling without squeeze schedule
-            # The merged KL starts low (averaged across 3 components)
-
-            if epoch >= 3:
-                # Set upper bound based on discovered ceiling
-                # Healthy target should be BELOW upper bound (not above!)
-                ceiling_with_headroom = discovered_kl_ceiling * 1.1
-                healthy_target = discovered_kl_ceiling * 0.8  # 80% of ceiling
-
-                GOAL_SPECS['kl_divergence']['lower'] = kl_lower
-                GOAL_SPECS['kl_divergence']['upper'] = ceiling_with_headroom
-                GOAL_SPECS['kl_divergence']['healthy'] = healthy_target
-
-                # Re-initialize goal system normalizers with new bounds
-                goal_system.goal_specs = GOAL_SPECS
-                goal_system.rebuild_normalizers()
-
-                if epoch == 3:
-                    print(f"🎯 KL bounds activated:")
-                    print(f"   Discovered ceiling: {discovered_kl_ceiling:,.0f} nats")
-                    print(f"   Upper bound: {ceiling_with_headroom:,.0f} nats (+10% headroom)")
-                    print(f"   Healthy target: {healthy_target:,.0f} nats (80% of ceiling)")
-                    print(f"   Lower bound: {kl_lower:,.0f} nats")
-
-        elif epoch in KL_SQUEEZE_SCHEDULE:
-            # FALLBACK: Use hardcoded schedule if discovery failed
-            # Note: Fallback schedule may not work well with merged kl_divergence
-            new_upper = KL_SQUEEZE_SCHEDULE[epoch]
-            if new_upper is not None:
-                healthy_target = new_upper * 0.8  # Healthy should be below upper
-
-                if epoch == 3:
-                    print(f"⚠️  Using fallback squeeze schedule (discovery failed)")
-                    print(f"🎯 KL bounds from fallback:")
-                    print(f"   Upper bound: {new_upper:,} nats")
-                    print(f"   Healthy target: {healthy_target:,.0f} nats")
-
-                GOAL_SPECS['kl_divergence']['lower'] = kl_lower
-                GOAL_SPECS['kl_divergence']['upper'] = new_upper
-                GOAL_SPECS['kl_divergence']['healthy'] = healthy_target
-                goal_system.goal_specs = GOAL_SPECS
-                goal_system.rebuild_normalizers()
-                print(f"🔽 KL ceiling updated to {new_upper:,} nats (epoch {epoch})")
+        # KL SQUEEZE SCHEDULE DISABLED
+        # The merged kl_divergence uses MINIMIZE_SOFT (no BOX_ASYMMETRIC bounds)
+        # Let KL optimize naturally without hard upper/lower bounds
+        pass
 
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
@@ -860,20 +818,11 @@ for epoch in range(1, EPOCHS + 1):
         ceiling_with_headroom = discovered_ceiling * 1.10
         discovered_kl_ceiling = ceiling_with_headroom  # Store for adaptive squeeze
 
-        print(f"\n🔍 EPOCH 2 KL CALIBRATION:")
+        print(f"\n🔍 EPOCH 2 KL CALIBRATION (INFO ONLY - NO BOUNDS SET):")
         print(f"   Max KL_core:   {max_kl_core:,.1f}")
         print(f"   Max KL_detail: {max_kl_detail:,.1f}")
         print(f"   Discovered ceiling: {discovered_ceiling:,.1f}")
-        print(f"   Setting upper bound: {ceiling_with_headroom:,.1f} (+10% headroom)")
-
-        # Update KL bounds for epoch 3+
-        if discovered_ceiling > 0:  # Only set if we have valid data
-            GOAL_SPECS['kl_divergence']['upper'] = ceiling_with_headroom
-            goal_system.specs = GOAL_SPECS
-            goal_system.rebuild_normalizers()
-            print(f"   ✓ KL ceiling will activate at start of epoch 3\n")
-        else:
-            print(f"   ⚠️  WARNING: No valid KL data (all rollbacks). Keeping unbounded for epoch 3.\n")
+        print(f"   Note: kl_divergence uses MINIMIZE_SOFT (no ceiling constraint)\n")
 
     if all_mu_core:
         mc, md = torch.cat(all_mu_core), torch.cat(all_mu_detail)

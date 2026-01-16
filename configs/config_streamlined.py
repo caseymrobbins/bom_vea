@@ -60,8 +60,11 @@ GOAL_SPECS = {
     # Combines: kl_core + kl_detail + prior_kl → unified KL target
     # Adaptive squeeze: 15k → 3k over epochs 3-15 (handled in training code)
     'kl_divergence': {
-        'type': ConstraintType.MINIMIZE_SOFT,
-        'scale': 'auto'  # Will be calibrated, then squeezed by training code
+        'type': ConstraintType.BOX_ASYMMETRIC,
+        'lower': 0.0,
+        'upper': 1e9,  # Will be squeezed dynamically
+        'healthy': 1e8,  # Set to 3000 when squeeze starts
+        'lower_scale': 2.0
     },
 
     # 2. Disentanglement - TC discriminator penalty

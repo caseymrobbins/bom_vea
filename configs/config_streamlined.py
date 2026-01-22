@@ -74,9 +74,12 @@ GOAL_SPECS = {
     # 3. Capacity - Latent utilization
     # Combines: core_active + detail_active + core_effective + detail_effective
     # Ensures latent dimensions are actually used (not collapsed)
+    # MANUAL SCALE: Original config uses 0.4 for capacity goals (active/effective dims)
+    # Capacity goals measure proportion of dimensions that are inactive, which changes
+    # as model learns to use latents. Manual scale ensures proper balance.
     'capacity': {
         'type': ConstraintType.MINIMIZE_SOFT,
-        'scale': 'auto'  # Let calibration set the scale based on raw values
+        'scale': 0.4  # Match original config's capacity scale
     },
 
     # 4. Behavioral separation - Structure vs Appearance
@@ -118,16 +121,23 @@ GOAL_SPECS = {
     # 8. Realism - GAN adversarial loss
     # Combines: realism_recon + realism_swap
     # Keeps reconstructions realistic (not blurry)
+    # MANUAL SCALE: Discriminator is untrained during calibration (D≈0.5), but trains quickly.
+    # After epoch 2+, discriminator gets skilled and D(recon) can reach 0.8-0.95.
+    # Auto-calibration would set scale≈0.4 based on epoch 1, causing realism to dominate.
+    # Manual scale=2.0 accounts for post-training difficulty, not calibration difficulty.
     'realism': {
         'type': ConstraintType.MINIMIZE_SOFT,
-        'scale': 'auto'  # Let calibration set the scale based on discriminator output
+        'scale': 2.0  # Manually tuned for trained discriminator, not untrained calibration
     },
 
     # 9. Consistency - Augmentation invariance
     # Core structure should be robust to augmentations
+    # MANUAL SCALE: Auto-calibration sees low variance in epoch 1 (≈115), but augmentation
+    # variance increases during training to 200-250 as model becomes more sensitive.
+    # Need large scale to handle this training-time variance, not calibration variance.
     'consistency': {
         'type': ConstraintType.MINIMIZE_SOFT,
-        'scale': 'auto'  # Let calibration set the scale based on augmentation variance
+        'scale': 500.0  # Manually tuned for training variance, not calibration variance
     },
 }
 

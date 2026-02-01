@@ -7,48 +7,70 @@ from typing import Dict, Callable
 from configs.config import ConstraintType
 
 def make_normalizer_torch(ctype: ConstraintType, **kwargs) -> Callable:
+    """
+    LBO-VAE score functions: Convert energies e_i to success scores s_i ∈ (0, 1]
+
+    KEY PRINCIPLE: NO CLAMPING of scores - let exponentials naturally decay
+    Clamping creates zero-gradient regions that break hard gradient routing
+    """
     if ctype == ConstraintType.UPPER:
         margin = kwargs["margin"]
-        return lambda x: torch.clamp((margin - x) / margin, 0.0, 1.0)
-    
+        # Pure exponential decay: s = exp(-(x - margin) / margin) when x > margin
+        # Inside margin: s = 1.0 (perfect score)
+        return lambda x: torch.where(x <= margin, torch.ones_like(x), torch.exp(-(x - margin) / margin))
+
     if ctype == ConstraintType.LOWER:
+        lower = kwargs["lower"]
         margin = kwargs["margin"]
-        return lambda x: torch.clamp((x - margin) / margin, 0.0, 1.0)
-    
+        # Pure exponential growth: s = exp((x - lower) / margin) when x < lower
+        # Above threshold: s = 1.0 (perfect score)
+        threshold = lower + margin
+        return lambda x: torch.where(x >= threshold, torch.ones_like(x), torch.exp((x - lower) / margin))
+
     if ctype == ConstraintType.BOX:
         lower, upper = kwargs["lower"], kwargs["upper"]
         mid = (lower + upper) / 2
         half_width = (upper - lower) / 2
-        steepness = 20.0
+        steepness = 2.0  # Reduced from 20.0 to prevent gradient explosion
         def soft_box(x):
             dist = torch.abs(x - mid) / half_width
+            # Inside box: linear decay from 1.0 at center to 0 at boundaries
             inside = 1.0 - dist
+            # Outside box: exponential decay (NO CLAMP)
             outside = torch.exp(-steepness * (dist - 1.0))
             return torch.where(dist <= 1.0, inside, outside)
         return soft_box
-    
+
     if ctype == ConstraintType.BOX_ASYMMETRIC:
         lower, upper, healthy = kwargs["lower"], kwargs["upper"], kwargs["healthy"]
         dist_lower, dist_upper = healthy - lower, upper - healthy
-        steepness = 20.0
+        eps = 1e-6
+        dist_lower = max(dist_lower, eps)
+        dist_upper = max(dist_upper, eps)
+        steepness = 2.0  # Reduced from 20.0 to prevent gradient explosion
         def soft_asymmetric_box(x):
+            # Inside box: linear interpolation from boundaries to healthy point
             below = (x - lower) / dist_lower
             above = (upper - x) / dist_upper
             inside = torch.where(x <= healthy, below, above)
+            # Outside box: exponential decay (NO CLAMP)
             left_tail = torch.exp(-steepness * (lower - x) / dist_lower)
             right_tail = torch.exp(-steepness * (x - upper) / dist_upper)
             outside = torch.where(x < lower, left_tail, right_tail)
             return torch.where((x >= lower) & (x <= upper), inside, outside)
         return soft_asymmetric_box
-    
+
     if ctype == ConstraintType.MINIMIZE_SOFT:
-        scale = kwargs["scale"]
-        return lambda x: torch.exp(-torch.clamp(x, min=0.0) / scale) if scale > 0 else torch.zeros_like(x)
-    
+        scale = max(kwargs["scale"], 5e-4)  # Enforce minimum scale to prevent numerical instability
+        # NO CLAMP: s = exp(-x / τ) - pure failure energy mapping
+        # Negative energies → scores > 1 (better than expected)
+        return lambda x: torch.exp(-x / scale)
+
     if ctype == ConstraintType.MINIMIZE_HARD:
         scale = kwargs.get("scale", 1.0)
-        return lambda x: 1.0 / (1.0 + (torch.clamp(x, min=0.0) / scale) ** 2)
-    
+        # NO CLAMP: Rational function handles all real values
+        return lambda x: 1.0 / (1.0 + (x / scale) ** 2)
+
     raise ValueError(f"Unknown constraint type: {ctype}")
 
 class GoalSystem:
@@ -59,6 +81,38 @@ class GoalSystem:
         self.samples = {name: [] for name in goal_specs.keys()}
         self.calibrated = False
         self.calibration_count = 0
+        self.epoch1_margin_applied = False  # Track if 10% safety margin is active
+
+        # Initialize all goals with VERY LARGE scales before calibration
+        # This allows the LBO loss to compute during the calibration phase without gradient explosions
+        # Calibration will then set proper scales based on observed MAX values
+        print("\n🔧 Initializing goal system with very large scales for calibration...")
+        for name, spec in goal_specs.items():
+            ctype = spec['type']
+            if ctype == ConstraintType.MINIMIZE_SOFT:
+                if spec.get('scale') == 'auto':
+                    # Auto-scaled goals: Start with VERY large scale (1000.0)
+                    # At initialization, losses are huge - need generous scaling
+                    # exp(-x/1000) ensures even x=500 gets score 0.61 (good enough for calibration)
+                    self.scales[name] = 1000.0
+                    self.normalizers[name] = make_normalizer_torch(ctype, scale=1000.0)
+                    print(f"  {name:20s}: scale=1000.0 (auto, will calibrate)")
+                else:
+                    # Fixed-scale goals: Use specified value multiplied by 10x during calibration
+                    # This prevents immediate gradient explosions before calibration completes
+                    calib_scale = spec['scale'] * 10.0
+                    self.scales[name] = calib_scale
+                    self.normalizers[name] = make_normalizer_torch(ctype, scale=calib_scale)
+                    print(f"  {name:20s}: scale={calib_scale:.1f} (fixed, 10x for calibration)")
+            elif ctype == ConstraintType.BOX:
+                self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'])
+            elif ctype == ConstraintType.BOX_ASYMMETRIC:
+                self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'], healthy=spec['healthy'])
+            elif ctype == ConstraintType.LOWER:
+                self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
+            else:
+                self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
+        print("✅ Initial scales set (very permissive) - ready for LBO calibration\n")
     
     def collect(self, loss_dict: Dict[str, float]):
         for name, value in loss_dict.items():
@@ -74,26 +128,33 @@ class GoalSystem:
         # Verify BOX constraints contain initial values
         box_violations = []
 
+        # EPOCH 1 SAFETY MARGIN: Apply 10% wider scales during first epoch
+        epoch1_margin = 1.10 if epoch == 1 else 1.0
+
         for name, spec in self.specs.items():
             ctype = spec['type']
             if ctype == ConstraintType.MINIMIZE_SOFT and spec.get('scale') == 'auto':
                 if self.samples.get(name):
-                    median = np.median(self.samples[name])
                     min_val = np.min(self.samples[name])
                     max_val = np.max(self.samples[name])
                     mean_val = np.mean(self.samples[name])
-                    # Use max if median is near zero (prevents over-sensitivity)
-                    # Minimum scale 0.001 to prevent goals from collapsing to zero
-                    if median < 1e-4:
-                        self.scales[name] = max(max_val, 0.001)
-                    else:
-                        self.scales[name] = max(median, 0.001)
+
+                    # LBO: Use MAX observed value for calibration (handles worst-case)
+                    # This ensures any value seen during calibration gets reasonable score
+                    # Minimum scale 5e-4 to prevent numerical instability
+                    self.scales[name] = max(max_val, 5e-4)
+
+                    # Apply epoch 1 safety margin
+                    self.scales[name] *= epoch1_margin
+
                     self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
-                    print(f"  {name:20s}: scale={self.scales[name]:.4f} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
+                    margin_note = " (+10% margin)" if epoch == 1 else ""
+                    print(f"  {name:20s}: scale={self.scales[name]:.4f}{margin_note} | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f} max={max_val:.4f}")
                 else:
-                    self.scales[name] = 1.0
-                    self.normalizers[name] = make_normalizer_torch(ctype, scale=1.0)
-                    print(f"  {name:20s}: scale=1.0 (no samples)")
+                    self.scales[name] = 1.0 * epoch1_margin
+                    self.normalizers[name] = make_normalizer_torch(ctype, scale=self.scales[name])
+                    margin_note = " (+10% margin)" if epoch == 1 else ""
+                    print(f"  {name:20s}: scale={self.scales[name]:.4f}{margin_note} (no samples)")
             elif ctype == ConstraintType.MINIMIZE_SOFT:
                 self.scales[name] = spec['scale']
                 self.normalizers[name] = make_normalizer_torch(ctype, scale=spec['scale'])
@@ -102,7 +163,8 @@ class GoalSystem:
                     max_val = np.max(self.samples[name])
                     mean_val = np.mean(self.samples[name])
                     median = np.median(self.samples[name])
-                    print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed) | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f}")
+                    percentile_95 = np.percentile(self.samples[name], 95)
+                    print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed) | raw: [{min_val:.4f}, {max_val:.4f}] mean={mean_val:.4f} p95={percentile_95:.4f}")
                 else:
                     print(f"  {name:20s}: scale={spec['scale']:.4f} (fixed)")
             elif ctype == ConstraintType.BOX:
@@ -148,19 +210,109 @@ class GoalSystem:
             print("    These constraints will return goal=0 → loss=inf → crash!")
             print("    ACTION: Widen BOX bounds to contain initialization values.\n")
 
+        # Track if margin was applied
+        if epoch == 1:
+            self.epoch1_margin_applied = True
+            print("\n⚠️  EPOCH 1 SAFETY MARGIN: All auto-scaled goals widened by 10%")
+            print("    Will be removed at start of Epoch 2 to tighten constraints\n")
+
         print("=" * 60 + "\n")
         self.calibrated = True
         self.samples = {name: [] for name in self.specs.keys()}
     
     def goal(self, value: torch.Tensor, name: str) -> torch.Tensor:
+        """Convert raw energy to success score (NO CLAMP)"""
         if name not in self.normalizers:
-            return 1.0 / (1.0 + torch.clamp(value, min=0.0))
+            # Fallback: rational function (NO CLAMP)
+            return 1.0 / (1.0 + value)
         return self.normalizers[name](value)
     
     def start_recalibration(self):
         self.samples = {name: [] for name in self.specs.keys()}
 
+    def rebuild_normalizers(self):
+        """Rebuild normalizers from current specs (used after tightening)"""
+        for name, spec in self.specs.items():
+            ctype = spec['type']
+            if ctype == ConstraintType.MINIMIZE_SOFT:
+                scale = self.scales.get(name, spec.get('scale', 1.0))
+                self.normalizers[name] = make_normalizer_torch(ctype, scale=scale)
+            elif ctype == ConstraintType.BOX:
+                self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'])
+            elif ctype == ConstraintType.BOX_ASYMMETRIC:
+                self.normalizers[name] = make_normalizer_torch(ctype, lower=spec['lower'], upper=spec['upper'], healthy=spec['healthy'])
+            elif ctype == ConstraintType.LOWER:
+                self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
+            else:
+                self.normalizers[name] = make_normalizer_torch(ctype, **{k: v for k, v in spec.items() if k != 'type'})
+
+    def remove_epoch1_margin(self):
+        """Remove the 10% safety margin applied during epoch 1 calibration"""
+        if not self.epoch1_margin_applied:
+            print("⚠️  No epoch 1 margin to remove (was not applied)")
+            return
+
+        print("\n" + "=" * 60)
+        print("🔧 REMOVING EPOCH 1 SAFETY MARGIN")
+        print("=" * 60)
+        print("Tightening auto-scaled goals from calibrated+10% → calibrated values\n")
+
+        for name, spec in self.specs.items():
+            if spec['type'] == ConstraintType.MINIMIZE_SOFT and spec.get('scale') == 'auto':
+                old_scale = self.scales[name]
+                self.scales[name] /= 1.10  # Remove 10% margin
+                print(f"  {name:20s}: {old_scale:.4f} → {self.scales[name]:.4f} (-9.1%)")
+
+        # Rebuild normalizers with tightened scales
+        self.rebuild_normalizers()
+        self.epoch1_margin_applied = False
+
+        print("\n✅ All auto-scaled constraints tightened to calibrated values")
+        print("=" * 60 + "\n")
+
 def geometric_mean(goals):
-    """Geometric mean - crashes on exact zero (fail-fast BOM)"""
-    goals = torch.stack(goals)
-    return goals.prod() ** (1.0 / len(goals))
+    """Geometric mean using log-space arithmetic to prevent underflow/overflow.
+
+    Standard formula: geom_mean = (∏ goals)^(1/n)
+    Log-space:        geom_mean = exp(mean(log(goals)))
+
+    This prevents:
+    - Underflow: (1e-10)^30 = 1e-300 → 0 in float32
+    - Overflow: (100)^30 = 1e60 → Inf in float32
+
+    LBO COMPLIANCE (Directive #4):
+    - NO CLAMP! If any goal ≤ 0, this returns 0 to trigger discrete rollback
+    - Clamping would artificially inflate failed constraints, preventing rollback
+
+    Args:
+        goals: List of tensors, each can be scalar or [B]
+
+    Returns:
+        Tensor: scalar if all inputs scalar, [B] if any input is [B]
+    """
+    # Stack as [n_goals, ...] - preserves per-sample structure if present
+    goals = torch.stack(goals)  # [n_goals] or [n_goals, B]
+
+    # LBO: NO CLAMP - let goals naturally reach 0 to trigger discrete rollback
+    # Check if any goal is ≤ 0 BEFORE log (discrete rollback)
+    if (goals <= 0).any():
+        # Return zeros with same shape as output
+        if goals.dim() == 1:
+            # All scalars → scalar output
+            return torch.tensor(0.0, device=goals.device, requires_grad=True)
+        else:
+            # Has batch dimension → [B] output
+            return torch.zeros(goals.shape[1], device=goals.device, requires_grad=True)
+
+    # Compute geometric mean in log space: exp(mean(log(goals)))
+    log_goals = torch.log(goals)
+
+    # Check for -inf from log() of very small positive values
+    if torch.isinf(log_goals).any():
+        if goals.dim() == 1:
+            return torch.tensor(0.0, device=goals.device, requires_grad=True)
+        else:
+            return torch.zeros(goals.shape[1], device=goals.device, requires_grad=True)
+
+    # Mean over goals (dim 0), preserve batch dimension if present
+    return torch.exp(log_goals.mean(dim=0))

@@ -1,8 +1,7 @@
-# train.py - v17: "Lazy Optimizer" design with asymmetric KL squeeze
-# Core = STRUCTURE (edges, geometry)
-# Detail = APPEARANCE (colors, lighting)
-# Latent group has 4 sub-groups: KL, Structure, Capacity, Detail Stats
-# v17 changes: KL squeeze 15k→3k (epochs 2-15), appearance upper bound, relaxed capacity (0.4)
+# train_streamlined.py - STREAMLINED VERSION: 9 FLAT goals instead of 35
+# Priority: Useful latents > Perfect reconstruction
+# Goals: 35 → 9 for cleaner gradient flow
+# Structure: FLAT (no grouping) - pure LBO with min() across all 9
 # MUON EXPERIMENT: Using Muon optimizer for VAE 2D params (Conv/Linear weights), AdamW for 1D params
 import os, sys, time, copy
 import torch
@@ -13,14 +12,14 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from configs.config import *
+from configs.config_streamlined import *
 from utils.data import load_from_config
 from models.vae import create_model
 from models.discriminator import create_discriminator
 from models.tc_discriminator import create_tc_discriminator
 from models.vgg import VGGFeatures
 from losses.goals import GoalSystem
-from losses.bom_loss import compute_raw_losses, grouped_bom_loss, check_tensor
+from losses.bom_loss_streamlined import compute_raw_losses, grouped_bom_loss_streamlined, check_tensor
 from utils.viz import plot_group_balance, plot_reconstructions, plot_traversals, plot_cross_reconstruction, plot_training_history
 from muon import SingleDeviceMuonWithAuxAdam
 
@@ -359,6 +358,8 @@ for epoch in range(1, EPOCHS + 1):
         print(f"\n📊 Epoch 1: Initial calibration of all goal scales...")
 
     # Remove epoch 1 safety margin at start of epoch 2
+    # This is part of calibration, not dynamic constraint modification
+    # Margin is applied to avoid early collapse, then removed after calibration stabilizes
     if epoch == 2 and goal_system.epoch1_margin_applied:
         goal_system.remove_epoch1_margin()
 
@@ -372,70 +373,10 @@ for epoch in range(1, EPOCHS + 1):
         else:
             kl_lower = 0.0
 
-        if discovered_kl_ceiling is not None:
-            # ADAPTIVE SQUEEZE: Use discovered ceiling from epoch 1
-            # Calculate squeeze from discovered ceiling → 3000 over epochs 3-15
-            # Use geometric progression: constant percentage reduction per epoch
-            target_kl = 3000.0
-            squeeze_start_epoch = 3
-            squeeze_end_epoch = 15
-
-            if epoch <= squeeze_end_epoch:
-                # Geometric interpolation from discovered_ceiling to target_kl
-                # At epoch 3: start from discovered ceiling
-                # At epoch 15: reach 3000
-                num_steps = squeeze_end_epoch - squeeze_start_epoch
-                step = epoch - squeeze_start_epoch
-
-                # Geometric progression: ceiling * (target/ceiling)^(step/num_steps)
-                ratio = (target_kl / discovered_kl_ceiling) ** (step / num_steps)
-                new_upper = discovered_kl_ceiling * ratio
-
-                # FIRST APPLICATION (epoch 3): Set healthy target to 3000 nats
-                # This activates the squeeze - epochs 1-2 had healthy=1e8 (no target)
-                if epoch == 3:
-                    GOAL_SPECS['kl_core']['healthy'] = target_kl
-                    GOAL_SPECS['kl_detail']['healthy'] = target_kl
-                    GOAL_SPECS['prior_kl']['healthy'] = target_kl * 2
-                    print(f"🎯 KL healthy target activated: {target_kl:,.0f} nats (squeeze begins)")
-                    print(f"   Discovered ceiling: {discovered_kl_ceiling:,.0f} nats")
-                    print(f"   Adaptive squeeze: {discovered_kl_ceiling:,.0f} → {target_kl:,.0f} over epochs 3-{squeeze_end_epoch}")
-
-                # Update upper bounds (squeeze the ceiling)
-                GOAL_SPECS['kl_core']['lower'] = kl_lower
-                GOAL_SPECS['kl_detail']['lower'] = kl_lower
-                GOAL_SPECS['kl_core']['upper'] = new_upper
-                GOAL_SPECS['kl_detail']['upper'] = new_upper
-                GOAL_SPECS['prior_kl']['lower'] = kl_lower * 2
-                GOAL_SPECS['prior_kl']['upper'] = new_upper * 2
-
-                # Re-initialize goal system normalizers with new bounds
-                goal_system.goal_specs = GOAL_SPECS
-                goal_system.rebuild_normalizers()
-
-                reduction_pct = 100 * (1 - new_upper / GOAL_SPECS['kl_core'].get('upper', new_upper))
-                print(f"🔽 KL ceiling squeezed to {new_upper:,.0f} nats (epoch {epoch}, {reduction_pct:.1f}% reduction)")
-
-        elif epoch in KL_SQUEEZE_SCHEDULE:
-            # FALLBACK: Use hardcoded schedule if discovery failed
-            new_upper = KL_SQUEEZE_SCHEDULE[epoch]
-            if new_upper is not None:
-                if epoch == 3:
-                    GOAL_SPECS['kl_core']['healthy'] = 3000.0
-                    GOAL_SPECS['kl_detail']['healthy'] = 3000.0
-                    GOAL_SPECS['prior_kl']['healthy'] = 6000.0
-                    print(f"⚠️  Using fallback squeeze schedule (discovery failed)")
-                    print(f"🎯 KL healthy target activated: 3000 nats (squeeze begins)")
-
-                GOAL_SPECS['kl_core']['lower'] = kl_lower
-                GOAL_SPECS['kl_detail']['lower'] = kl_lower
-                GOAL_SPECS['kl_core']['upper'] = new_upper
-                GOAL_SPECS['kl_detail']['upper'] = new_upper
-                GOAL_SPECS['prior_kl']['lower'] = kl_lower * 2
-                GOAL_SPECS['prior_kl']['upper'] = new_upper * 2
-                goal_system.goal_specs = GOAL_SPECS
-                goal_system.rebuild_normalizers()
-                print(f"🔽 KL ceiling squeezed to {new_upper:,} nats (epoch {epoch})")
+        # KL SQUEEZE SCHEDULE DISABLED
+        # The merged kl_divergence uses MINIMIZE_SOFT (no BOX_ASYMMETRIC bounds)
+        # Let KL optimize naturally without hard upper/lower bounds
+        pass
 
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
@@ -577,7 +518,7 @@ for epoch in range(1, EPOCHS + 1):
             if not goal_system.calibrated:
                 # LBO FIX: Use actual LBO loss during calibration, not MSE
                 # This ensures calibration sees the same optimization dynamics as training
-                cal_result = grouped_bom_loss(recon, x, mu, logvar, z_parts, model, goal_system, vgg, GROUP_NAMES, discriminator, x_aug, tc_logits)
+                cal_result = grouped_bom_loss_streamlined(recon, x, mu, logvar, z_parts, model, goal_system, vgg, GROUP_NAMES, discriminator, x_aug, tc_logits)
 
                 if cal_result is None or cal_result['groups'].min() <= 0:
                     print(f"    [CALIBRATION SKIP] Invalid LBO result at batch {batch_idx}")
@@ -605,7 +546,7 @@ for epoch in range(1, EPOCHS + 1):
             needs_recal = False
             # Note: Removed BN reset - calibration stats should be fine for LBO training
 
-        result = grouped_bom_loss(recon, x, mu, logvar, z_parts, model, goal_system, vgg, GROUP_NAMES, discriminator, x_aug, tc_logits)
+        result = grouped_bom_loss_streamlined(recon, x, mu, logvar, z_parts, model, goal_system, vgg, GROUP_NAMES, discriminator, x_aug, tc_logits)
 
         # SINGLE SKIP DECISION POINT: Check result validity BEFORE dereferencing
         # Fix: Check result is None BEFORE accessing result['loss']
@@ -879,21 +820,11 @@ for epoch in range(1, EPOCHS + 1):
         ceiling_with_headroom = discovered_ceiling * 1.10
         discovered_kl_ceiling = ceiling_with_headroom  # Store for adaptive squeeze
 
-        print(f"\n🔍 EPOCH 2 KL CALIBRATION:")
+        print(f"\n🔍 EPOCH 2 KL CALIBRATION (INFO ONLY - NO BOUNDS SET):")
         print(f"   Max KL_core:   {max_kl_core:,.1f}")
         print(f"   Max KL_detail: {max_kl_detail:,.1f}")
         print(f"   Discovered ceiling: {discovered_ceiling:,.1f}")
-        print(f"   Setting upper bound: {ceiling_with_headroom:,.1f} (+10% headroom)")
-
-        # Update KL bounds for epoch 3+
-        if discovered_ceiling > 0:  # Only set if we have valid data
-            GOAL_SPECS['kl_core']['upper'] = ceiling_with_headroom
-            GOAL_SPECS['kl_detail']['upper'] = ceiling_with_headroom
-            goal_system.specs = GOAL_SPECS
-            goal_system.rebuild_normalizers()
-            print(f"   ✓ KL ceiling will activate at start of epoch 3\n")
-        else:
-            print(f"   ⚠️  WARNING: No valid KL data (all rollbacks). Keeping unbounded for epoch 3.\n")
+        print(f"   Note: kl_divergence uses MINIMIZE_SOFT (no ceiling constraint)\n")
 
     if all_mu_core:
         mc, md = torch.cat(all_mu_core), torch.cat(all_mu_detail)
@@ -924,75 +855,15 @@ for epoch in range(1, EPOCHS + 1):
     # Adaptive tightening with progressive backoff
     rollback_rate = skip_count / total_batches if total_batches > 0 else 0
 
-    # Check if last tightening was too aggressive (>15% rollbacks) - RESTORE previous constraints
-    if epoch >= ADAPTIVE_TIGHTENING_START + 1 and rollback_rate > ROLLBACK_THRESHOLD_MAX and previous_goal_specs is not None:
-        print(f"\n⚠️  Rollback rate too high ({rollback_rate*100:.0f}%), RESTORING previous constraints")
-        # Restore the constraints from before tightening
-        for name in GOAL_SPECS:
-            GOAL_SPECS[name] = copy.deepcopy(previous_goal_specs[name])
-        goal_system.specs = GOAL_SPECS
-        goal_system.rebuild_normalizers()
-        previous_goal_specs = None  # Clear backup
-
-    # Decide if we should tighten this epoch
-    # LBO Directive #6: Only tighten when "VAE stabilizes (S_min > 0.5)"
-    # v17: Constant 5% squeeze every epoch (simplified from progressive rates)
-    current_rate = ADAPTIVE_TIGHTENING_RATE
-
-    # Check stability: average min_group over last STABILITY_WINDOW epochs
-    from configs.config import MIN_GROUP_STABILITY_THRESHOLD, STABILITY_WINDOW
-    recent_min_groups = histories['min_group'][-STABILITY_WINDOW:] if len(histories['min_group']) >= STABILITY_WINDOW else histories['min_group']
-    avg_min_group = sum(recent_min_groups) / len(recent_min_groups) if recent_min_groups else 0.0
-    is_stable = avg_min_group >= MIN_GROUP_STABILITY_THRESHOLD
-
-    should_tighten = epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate < ROLLBACK_THRESHOLD_TARGET and is_stable
-
-    # Track when we first hit the target threshold
-    if epoch >= ADAPTIVE_TIGHTENING_START and rollback_rate >= ROLLBACK_THRESHOLD_TARGET and threshold_hit_epoch is None:
-        threshold_hit_epoch = epoch
+    # CONSTRAINT RESTORATION DISABLED FOR STREAMLINED CONFIG
+    # Pure LBO: no dynamic constraint modifications
 
     print(f"\nEpoch {epoch:2d} | Loss: {histories['loss'][-1]:.3f} | Min: {histories['min_group'][-1]:.3f} | SSIM: {histories['ssim'][-1]:.3f}")
     print(f"         Structure: {struct:.4f} | Appearance: {appear:.4f}")
     print(f"         KL_core: {kl_c:.1f} | KL_detail: {kl_d:.1f}")
     print(f"         Groups: " + " | ".join(f"{n}:{histories[f'group_{n}'][-1]:.2f}" for n in GROUP_NAMES))
     print(f"         Bottlenecks: " + " | ".join(f"{n}:{bn_pcts[n]:.1f}%" for n in GROUP_NAMES))
-    print(f"         Rollbacks: {skip_count}/{total_batches} ({rollback_rate*100:.1f}%)", end="")
-
-    if should_tighten:
-        tightening_pct = int((1 - current_rate) * 100)
-        print(f" → 🔧 TIGHTENING {tightening_pct}% (rollback={rollback_rate*100:.1f}% < {ROLLBACK_THRESHOLD_TARGET*100:.0f}%, stable={avg_min_group:.3f} > {MIN_GROUP_STABILITY_THRESHOLD})")
-
-        # Save current constraints before tightening (for potential rollback)
-        previous_goal_specs = {name: copy.deepcopy(spec) for name, spec in GOAL_SPECS.items()}
-
-        # Tighten constraints progressively
-        # MINIMIZE_SOFT: Full tightening (harder to satisfy)
-        for name, spec in GOAL_SPECS.items():
-            if spec['type'] == ConstraintType.MINIMIZE_SOFT and isinstance(spec.get('scale'), (int, float)):
-                spec['scale'] *= current_rate
-
-        # BOX: Gentler tightening (50% of MINIMIZE_SOFT rate) to avoid boundary violations
-        box_rate = 1.0 - (1.0 - current_rate) * 0.5  # Half the tightening
-        for name, spec in GOAL_SPECS.items():
-            if spec['type'] in [ConstraintType.BOX, ConstraintType.BOX_ASYMMETRIC]:
-                if 'lower' in spec and 'upper' in spec:
-                    center = (spec['lower'] + spec['upper']) / 2
-                    range_half = (spec['upper'] - spec['lower']) / 2
-                    new_range_half = range_half * box_rate
-                    spec['lower'] = center - new_range_half
-                    spec['upper'] = center + new_range_half
-
-        # Update goal_system with tightened specs (rebuild normalizers, keep scales)
-        goal_system.specs = GOAL_SPECS
-        goal_system.rebuild_normalizers()
-    else:
-        if epoch >= ADAPTIVE_TIGHTENING_START:
-            if not is_stable:
-                print(f" → ⏸️  Skipping tightening (unstable: avg_min={avg_min_group:.3f} < {MIN_GROUP_STABILITY_THRESHOLD})")
-            else:
-                print(f" → ⚠️  At limit ({rollback_rate*100:.1f}% >= {ROLLBACK_THRESHOLD_TARGET*100:.0f}%)")
-        else:
-            print()
+    print(f"         Rollbacks: {skip_count}/{total_batches} ({rollback_rate*100:.1f}%)")
 
     # Generate visualizations at the end of each epoch
     print(f"\n📸 Generating epoch {epoch} visualizations...")
